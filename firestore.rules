@@ -1,0 +1,148 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 0. Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Primitives ---
+    
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerified() {
+      return isSignedIn() && (request.auth.token.email_verified == true || request.auth.token.email_verified == null || !('email_verified' in request.auth.token));
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // --- Validation Blueprints ---
+
+    function isValidMusicItem(data) {
+      return data.userId == request.auth.uid &&
+             data.type in ['artist', 'album', 'playlist', 'track'] &&
+             data.name is string && data.name.size() > 0 && data.name.size() <= 500 &&
+             (!('url' in data) || data.url == null || (data.url is string && data.url.size() <= 2000)) &&
+             (!('imageUrl' in data) || data.imageUrl == null || (data.imageUrl is string && data.imageUrl.size() <= 2000)) &&
+             (!('parentId' in data) || data.parentId == null || (data.parentId is string && data.parentId.size() <= 128)) &&
+             (!('parentName' in data) || data.parentName == null || (data.parentName is string && data.parentName.size() <= 500)) &&
+             (!('subtitle' in data) || data.subtitle == null || (data.subtitle is string && data.subtitle.size() <= 500)) &&
+             (!('songCount' in data) || data.songCount == null || ((data.songCount is int || data.songCount is float) && data.songCount >= 0)) &&
+             (!('durationSeconds' in data) || data.durationSeconds == null || ((data.durationSeconds is int || data.durationSeconds is float) && data.durationSeconds >= 0)) &&
+             (!('creator' in data) || data.creator == null || (data.creator is string && data.creator.size() <= 500)) &&
+             (!('creatorUrl' in data) || data.creatorUrl == null || (data.creatorUrl is string && data.creatorUrl.size() <= 2000)) &&
+             (!('relevance' in data) || data.relevance == null || ((data.relevance is int || data.relevance is float) && data.relevance >= 0 && data.relevance <= 100)) &&
+             (!('favoriteLevel' in data) || data.favoriteLevel == null || ((data.favoriteLevel is int || data.favoriteLevel is float) && data.favoriteLevel >= 0 && data.favoriteLevel <= 10)) &&
+             (!('familiarity' in data) || data.familiarity == null || ((data.familiarity is int || data.familiarity is float) && data.familiarity >= 0 && data.familiarity <= 100)) &&
+             (!('aiAnalyzed' in data) || data.aiAnalyzed == null || (data.aiAnalyzed is bool)) &&
+             (!('releaseDate' in data) || data.releaseDate == null || (data.releaseDate is string && data.releaseDate.size() <= 100)) &&
+             (!('artistUrl' in data) || data.artistUrl == null || (data.artistUrl is string && data.artistUrl.size() <= 2000)) &&
+             (!('rating' in data) || data.rating == null || ((data.rating is int || data.rating is float) && data.rating >= 0 && data.rating <= 100)) &&
+             (!('tags' in data) || data.tags == null || (data.tags is list && data.tags.size() <= 200 && (data.tags.size() == 0 || data.tags[0] is string))) &&
+             (!('tagSources' in data) || data.tagSources == null || (data.tagSources is map)) &&
+             (!('primaryCluster' in data) || data.primaryCluster == null || (data.primaryCluster is string && data.primaryCluster.size() <= 200)) &&
+             (!('genres' in data) || data.genres == null || (data.genres is string && data.genres.size() <= 2000) || (data.genres is list && data.genres.size() <= 100)) &&
+             (!('relatedToSource' in data) || data.relatedToSource == null || (data.relatedToSource is string && data.relatedToSource.size() <= 2000)) &&
+             (!('rhythms' in data) || data.rhythms == null || (data.rhythms is string && data.rhythms.size() <= 2000)) &&
+             (!('bpm' in data) || data.bpm == null || data.bpm is int || data.bpm is float || (data.bpm is string && data.bpm.size() <= 50)) &&
+             (!('instrumentationDetails' in data) || data.instrumentationDetails == null || (data.instrumentationDetails is string && data.instrumentationDetails.size() <= 5000)) &&
+             (!('key' in data) || data.key == null || (data.key is string && data.key.size() <= 100)) &&
+             (!('notes' in data) || data.notes == null || (data.notes is string && data.notes.size() <= 20000)) &&
+             (!('lastFmPlaycount' in data) || data.lastFmPlaycount == null || ((data.lastFmPlaycount is int || data.lastFmPlaycount is float) && data.lastFmPlaycount >= 0)) &&
+             (!('lastFmPeriodPlaycount' in data) || data.lastFmPeriodPlaycount == null || ((data.lastFmPeriodPlaycount is int || data.lastFmPeriodPlaycount is float) && data.lastFmPeriodPlaycount >= 0)) &&
+             (!('lastFmPeriod' in data) || data.lastFmPeriod == null || (data.lastFmPeriod is string && data.lastFmPeriod.size() <= 100)) &&
+             (!('lastFmUrl' in data) || data.lastFmUrl == null || (data.lastFmUrl is string && data.lastFmUrl.size() <= 2000)) &&
+             (!('lastFmListeners' in data) || data.lastFmListeners == null || ((data.lastFmListeners is int || data.lastFmListeners is float) && data.lastFmListeners >= 0)) &&
+             (!('lastFmEnrichedAt' in data) || data.lastFmEnrichedAt == null || (data.lastFmEnrichedAt is string && data.lastFmEnrichedAt.size() <= 200));
+    }
+
+    function isValidUserSettings(data) {
+      return data.userId == request.auth.uid &&
+             (!('aiClusters' in data) || data.aiClusters == null || (data.aiClusters is list && data.aiClusters.size() <= 100)) &&
+             (!('customClusters' in data) || data.customClusters == null || (data.customClusters is list && data.customClusters.size() <= 100)) &&
+             (!('lowPriorityTags' in data) || data.lowPriorityTags == null || (data.lowPriorityTags is list && data.lowPriorityTags.size() <= 500)) &&
+             (!('preferredAIModel' in data) || (data.preferredAIModel is string && data.preferredAIModel.size() <= 100)) &&
+             (!('tagMatchStrategy' in data) || (data.tagMatchStrategy in ['and', 'or'])) &&
+             (!('prioritizeStarSearchFirst' in data) || data.prioritizeStarSearchFirst == null || (data.prioritizeStarSearchFirst is bool)) &&
+             (!('lastFmSettings' in data) || data.lastFmSettings == null || (data.lastFmSettings is map));
+    }
+
+    // --- Collections ---
+
+    match /musicItems/{itemId} {
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow get: if isSignedIn() && resource.data.userId == request.auth.uid;
+
+      allow create: if isSignedIn() && 
+                      isValidId(itemId) && 
+                      isValidMusicItem(incoming()) &&
+                      incoming().createdAt == request.time &&
+                      incoming().updatedAt == request.time &&
+                      incoming().keys().hasAll(['userId', 'type', 'name', 'createdAt', 'updatedAt']) &&
+                      incoming().keys().size() >= 5 && incoming().keys().size() <= 40;
+
+      allow update: if isSignedIn() && 
+                      isValidMusicItem(incoming()) &&
+                      incoming().userId == existing().userId &&
+                      incoming().type == existing().type &&
+                      (!('createdAt' in existing()) || incoming().createdAt == existing().createdAt) &&
+                      incoming().diff(existing()).affectedKeys().hasOnly([
+                        'name', 'url', 'imageUrl', 'type', 'parentId', 'parentName', 
+                        'subtitle', 'songCount', 'durationSeconds', 'creator', 'creatorUrl', 
+                        'relevance', 'favoriteLevel', 'familiarity', 'aiAnalyzed', 
+                        'tags', 'tagSources', 'primaryCluster', 'genres', 'relatedToSource',
+                        'rhythms', 'bpm', 'instrumentationDetails', 'key', 'rating', 'notes', 
+                        'releaseDate', 'artistUrl', 'lastFmPlaycount', 'lastFmPeriodPlaycount',
+                        'lastFmPeriod', 'lastFmUrl', 'lastFmListeners', 'lastFmEnrichedAt', 'updatedAt'
+                      ]);
+
+      allow delete: if isSignedIn() && resource.data.userId == request.auth.uid;
+    }
+
+    match /userSettings/{userId} {
+      allow list: if isSignedIn() && userId == request.auth.uid;
+      allow get: if isSignedIn() && userId == request.auth.uid;
+
+      allow create: if isSignedIn() && 
+                      userId == request.auth.uid &&
+                      isValidId(userId) && 
+                      isValidUserSettings(incoming()) &&
+                      incoming().updatedAt == request.time &&
+                      incoming().keys().hasAll(['userId', 'updatedAt']) &&
+                      incoming().keys().size() >= 2 && incoming().keys().size() <= 12;
+
+      allow update: if isSignedIn() && 
+                      userId == request.auth.uid &&
+                      isValidUserSettings(incoming()) &&
+                      incoming().userId == existing().userId &&
+                      incoming().diff(existing()).affectedKeys().hasOnly([
+                        'aiClusters', 'customClusters', 'lowPriorityTags', 
+                        'preferredAIModel', 'tagMatchStrategy', 'prioritizeStarSearchFirst', 'lastFmSettings', 'updatedAt'
+                      ]);
+
+      allow delete: if isSignedIn() && userId == request.auth.uid;
+    }
+
+    match /demoSnapshots/{snapshotId} {
+      allow get, list: if true;
+      allow create, update, delete: if isSignedIn();
+
+      match /chunks/{chunkId} {
+        allow get, list: if true;
+        allow create, update, delete: if isSignedIn();
+      }
+    }
+  }
+}

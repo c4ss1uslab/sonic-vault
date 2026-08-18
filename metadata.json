@@ -1,0 +1,6 @@
+{
+  "name": "Sonic Vault",
+  "description": "A sophisticated music curation and metadata vault for organizing and visualizating playlists, albums, artists, and tracks with custom tags, ratings, and notes.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

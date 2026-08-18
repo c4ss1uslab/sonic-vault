@@ -1,0 +1,127 @@
+{
+  "entities": {
+    "MusicItem": {
+      "title": "Music Item",
+      "description": "Base entity for artists, albums, playlists, and tracks with curation and Last.fm intelligence metadata.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "userId": { "type": "string" },
+        "type": { "type": "string", "enum": ["artist", "album", "playlist", "track"] },
+        "name": { "type": "string", "maxLength": 500 },
+        "url": { "type": "string", "format": "uri", "maxLength": 1000 },
+        "imageUrl": { "type": "string", "format": "uri", "maxLength": 1000 },
+        "parentId": { "type": "string", "description": "ID of the parent artist (for albums/tracks) or album (for tracks)." },
+        "parentName": { "type": "string", "maxLength": 500 },
+        "subtitle": { "type": "string", "maxLength": 500 },
+        "songCount": { "type": "integer", "minimum": 0 },
+        "durationSeconds": { "type": "integer", "minimum": 0 },
+        "creator": { "type": "string", "maxLength": 200 },
+        "creatorUrl": { "type": "string", "format": "uri", "maxLength": 1000 },
+        "relevance": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "favoriteLevel": { "type": "integer", "minimum": 0, "maximum": 10 },
+        "familiarity": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "aiAnalyzed": { "type": "boolean" },
+        "releaseDate": { "type": "string", "maxLength": 100 },
+        "artistUrl": { "type": "string", "format": "uri", "maxLength": 1000 },
+        "tags": { "type": "array", "maxItems": 100, "items": { "type": "string", "maxLength": 100 } },
+        "tagSources": { "type": "object", "description": "Mapping of tag to source origin ('manual', 'llm', or 'lastfm')" },
+        "primaryCluster": { "type": "string", "maxLength": 200 },
+        "genres": { "type": "string", "maxLength": 2000 },
+        "relatedToSource": { "type": "string", "maxLength": 2000 },
+        "rhythms": { "type": "string", "maxLength": 2000 },
+        "bpm": { "type": "string", "maxLength": 50 },
+        "instrumentationDetails": { "type": "string", "maxLength": 5000 },
+        "key": { "type": "string", "maxLength": 100 },
+        "rating": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "notes": { "type": "string", "maxLength": 10000 },
+        "lastFmPlaycount": { "type": "integer", "minimum": 0 },
+        "lastFmPeriodPlaycount": { "type": "integer", "minimum": 0 },
+        "lastFmPeriod": { "type": "string", "maxLength": 50 },
+        "lastFmUrl": { "type": "string", "format": "uri", "maxLength": 1000 },
+        "lastFmListeners": { "type": "integer", "minimum": 0 },
+        "lastFmEnrichedAt": { "type": "string", "maxLength": 100 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "type", "name", "url", "createdAt", "updatedAt"]
+    },
+    "UserSettings": {
+      "title": "User Settings",
+      "description": "User preferences, tag cluster configurations, and Last.fm account settings.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "aiClusters": {
+          "type": "array",
+          "description": "Custom or AI-generated tag clusters",
+          "items": { "type": "object" }
+        },
+        "customClusters": {
+          "type": "array",
+          "description": "User custom tag clusters",
+          "items": { "type": "object" }
+        },
+        "lowPriorityTags": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "preferredAIModel": { "type": "string", "maxLength": 100 },
+        "tagMatchStrategy": { "type": "string", "enum": ["and", "or"] },
+        "prioritizeStarSearchFirst": { "type": "boolean" },
+        "lastFmSettings": {
+          "type": "object",
+          "description": "Last.fm credentials and sync settings"
+        },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "updatedAt"]
+    },
+    "DemoSnapshot": {
+      "title": "Demo Snapshot",
+      "description": "Published snapshot of vault library metadata and clusters for public demo mode.",
+      "type": "object",
+      "properties": {
+        "publishedBy": { "type": "string" },
+        "publishedByEmail": { "type": "string" },
+        "totalItems": { "type": "integer", "minimum": 0 },
+        "chunkCount": { "type": "integer", "minimum": 0 },
+        "items": { "type": "array" },
+        "customClusters": { "type": "array" },
+        "aiClusters": { "type": "array" },
+        "lowPriorityTags": { "type": "array" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["updatedAt"]
+    },
+    "DemoSnapshotChunk": {
+      "title": "Demo Snapshot Chunk",
+      "description": "Partitioned music item chunks so large demo snapshot libraries never exceed Firestore 1MB document limit.",
+      "type": "object",
+      "properties": {
+        "index": { "type": "integer", "minimum": 0 },
+        "items": { "type": "array" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["index", "items", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/musicItems/{itemId}": {
+      "schema": "MusicItem",
+      "description": "All music entities stored in a flat collection for easier cross-type filtering and search."
+    },
+    "/userSettings/{userId}": {
+      "schema": "UserSettings",
+      "description": "User-specific settings and tag cluster configurations."
+    },
+    "/demoSnapshots/{snapshotId}": {
+      "schema": "DemoSnapshot",
+      "description": "Published demo snapshots accessible publicly for read-only demo mode loading."
+    },
+    "/demoSnapshots/{snapshotId}/chunks/{chunkId}": {
+      "schema": "DemoSnapshotChunk",
+      "description": "Partitioned items chunks for large demo snapshot libraries to ensure <1MB Firestore document limit is never exceeded."
+    }
+  }
+}
