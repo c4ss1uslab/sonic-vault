@@ -1,11 +1,15 @@
-<div align="center">
+live at: https://sonic-vault.ai.studio/
 
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
+## Getting Started
 
-  <h1>Built with AI Studio</h2>
-
-  <p>The fastest path from prompt to production with Gemini.</p>
-
-  <a href="https://aistudio.google.com/apps">Start building</a>
-
-</div>
+### Firebase Setup
+1. Copy `firebase-applet-config.example.json` to `firebase-applet-config.json`:
+   ```bash
+   cp firebase-applet-config.example.json firebase-applet-config.json
+   ```
+2. Replace placeholder values in `firebase-applet-config.json` with your own Firebase project credentials.
+3. Install dependencies and start the app:
+   ```bash
+   npm install
+   npm run dev
+   ```
