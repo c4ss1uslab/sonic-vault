@@ -21,6 +21,48 @@ export interface StoredAudioRecord {
 }
 
 let dbInstance: IDBDatabase | null = null;
+let persistRequested = false;
+
+/**
+ * Ask the browser to keep IndexedDB data instead of evicting it under storage pressure.
+ * Without this, stored audio is "best-effort" and can be silently dropped.
+ */
+async function requestPersistentStorage(): Promise<void> {
+  if (persistRequested) return;
+  persistRequested = true;
+  try {
+    if (navigator.storage?.persisted && navigator.storage?.persist) {
+      const already = await navigator.storage.persisted();
+      if (!already) await navigator.storage.persist();
+    }
+  } catch {
+    // Not supported / denied: nothing more we can do.
+  }
+}
+
+/**
+ * Ordered list of IndexedDB keys an item's audio may be stored under.
+ * The first entry is the canonical key used for new uploads; the others are
+ * legacy keys used by older upload paths (which saved under item.id).
+ */
+export function getAudioKeyCandidates(item: { id: string; audioStorageKey?: string; parentItemId?: string }): string[] {
+  const parentId = item.parentItemId || (item.id.includes('__seg__') ? item.id.split('__seg__')[0] : undefined);
+  const keys = [item.audioStorageKey, parentId, item.id].filter((k): k is string => Boolean(k));
+  return Array.from(new Set(keys));
+}
+
+/** Canonical key where an item's audio should be saved / looked up first. */
+export function getCanonicalAudioKey(item: { id: string; audioStorageKey?: string; parentItemId?: string }): string {
+  return getAudioKeyCandidates(item)[0];
+}
+
+/** Returns the first candidate key that actually has a stored blob, or null. */
+export async function findStoredAudioKey(item: { id: string; audioStorageKey?: string; parentItemId?: string }): Promise<string | null> {
+  for (const key of getAudioKeyCandidates(item)) {
+    if (await hasLocalAudio(key)) return key;
+  }
+  return null;
+}
 
 async function getAudioDB(): Promise<IDBDatabase> {
   if (dbInstance) return dbInstance;
@@ -268,7 +310,7 @@ export async function importAudioVaultZip(
  */
 export async function matchAndImportAudioFiles(
   files: FileList | File[],
-  existingItems?: Array<{ id: string; name: string; audioFileName?: string }>
+  existingItems?: Array<{ id: string; name: string; audioFileName?: string; audioStorageKey?: string }>
 ): Promise<{ importedCount: number; matchedCount: number; matchedItems: string[] }> {
   const fileArray = Array.from(files);
   let importedCount = 0;
@@ -288,7 +330,9 @@ export async function matchAndImportAudioFiles(
         return false;
       });
 
-      const targetId = matchingItem ? matchingItem.id : `audio_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+      const targetId = matchingItem
+        ? getCanonicalAudioKey(matchingItem)
+        : `audio_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
       const duration = await getAudioDuration(file);
 
       await saveAudioFile(targetId, file, fileName, file.type || 'audio/mpeg', duration);
@@ -316,9 +360,10 @@ export async function saveAudioFile(
   mimeType?: string,
   durationSeconds?: number
 ): Promise<void> {
+  requestPersistentStorage();
   try {
     const db = await getAudioDB();
-    return new Promise((resolve, reject) => {
+    return await new Promise((resolve, reject) => {
       const tx = db.transaction(STORE_NAME, 'readwrite');
       const store = tx.objectStore(STORE_NAME);
       const record: StoredAudioRecord = {
@@ -329,12 +374,15 @@ export async function saveAudioFile(
         durationSeconds: durationSeconds || 0,
         updatedAt: Date.now(),
       };
-      const req = store.put(record);
-      req.onsuccess = () => resolve();
-      req.onerror = (e: any) => reject(e.target.error);
+      store.put(record);
+      // Resolve only once the transaction is durably committed (quota errors surface at commit time).
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error || new Error('Audio save transaction aborted (storage quota may be exceeded).'));
     });
   } catch (err) {
     console.error('Error saving audio file to IndexedDB:', err);
+    throw err;
   }
 }
 
@@ -573,6 +621,25 @@ export function formatAudioDuration(seconds?: number): string {
   const mins = Math.floor(seconds / 60);
   const secs = Math.floor(seconds % 60);
   return `${mins}:${secs < 10 ? '0' : ''}${secs}`;
+}
+
+/**
+ * Format seconds with millisecond precision, e.g. 74.0625 -> "1:14.063"
+ */
+export function formatPreciseTime(seconds?: number): string {
+  if (seconds === undefined || seconds === null || isNaN(seconds) || seconds <= 0) return '0:00.000';
+  const totalMs = Math.round(seconds * 1000);
+  const mins = Math.floor(totalMs / 60000);
+  const secs = Math.floor((totalMs % 60000) / 1000);
+  const ms = totalMs % 1000;
+  return `${mins}:${secs < 10 ? '0' : ''}${secs}.${ms.toString().padStart(3, '0')}`;
+}
+
+/**
+ * Round a seconds value to whole milliseconds (avoids float noise like 14.124999999)
+ */
+export function roundToMs(seconds: number): number {
+  return Math.round(seconds * 1000) / 1000;
 }
 
 /**

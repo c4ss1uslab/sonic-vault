@@ -9,7 +9,9 @@ import { MusicItem, TagCluster, AudioSegment, LastFmSettings } from '../types';
 import { cn } from '../lib/utils';
 import { getClusterColor } from '../lib/clusterColors';
 import { fetchItemArtwork, getTimeframeShortLabel, getTimeframeFullLabel } from '../lib/lastfm';
-import { formatAudioDuration, parseTimeToSeconds, saveAudioFile, getAudioDuration } from '../lib/audioDb';
+import { formatAudioDuration, formatPreciseTime } from '../lib/audioDb';
+import { PreciseTimeInput } from './PreciseTimeInput';
+import { ArtistPicker } from './ArtistPicker';
 
 const Button = ({ className, variant = 'primary', ...props }: any) => {
   const variants: any = {
@@ -379,6 +381,8 @@ export interface DetailItemModalProps {
   onDeleteItem: (item: MusicItem) => void;
   onPlayAudio: (item: MusicItem, shouldLoop?: boolean, segmentId?: string) => void;
   onSeekAudio: (time: number) => void;
+  onReplaceAudio?: (item: MusicItem, file: File) => Promise<{ ok: boolean; message: string }>;
+  isAudioMissing?: (item: MusicItem) => boolean;
   onAnalyze: (item: MusicItem) => void;
   onEnrichItem: (item: MusicItem) => void;
   onOpenExcerptUpload: (artistName?: string, trackName?: string, artistId?: string, trackId?: string) => void;
@@ -410,6 +414,8 @@ export const DetailItemModal: React.FC<DetailItemModalProps> = ({
   onDeleteItem,
   onPlayAudio,
   onSeekAudio,
+  onReplaceAudio,
+  isAudioMissing,
   onAnalyze,
   onEnrichItem,
   onOpenExcerptUpload,
@@ -541,6 +547,9 @@ export const DetailItemModal: React.FC<DetailItemModalProps> = ({
     onClose();
   };
 
+  // Re-upload feedback for this item's audio file (keyed by item so it resets when switching items)
+  const [audioUploadState, setAudioUploadState] = useState<{ itemId?: string; busy: boolean; message?: string; error?: boolean }>({ busy: false });
+
   if (!item) return null;
 
   // Star & Look helpers
@@ -621,12 +630,19 @@ export const DetailItemModal: React.FC<DetailItemModalProps> = ({
     }
   };
 
+  const libraryArtists = items.filter(i => i.type === 'artist');
+
   // Linked excerpts for track or artist
   const linkedExcerpts = items.filter(i => {
     if (i.type !== 'excerpt') return false;
     if (item.type === 'artist') {
+      const artistNameLower = item.name.toLowerCase();
       return (
         i.linkedArtistId === item.id ||
+        // An individual excerpt inside the card credits this artist
+        (i.segments || []).some(seg =>
+          seg.artistId === item.id || (seg.artistName && seg.artistName.toLowerCase() === artistNameLower)
+        ) ||
         (i.linkedArtistName && i.linkedArtistName.toLowerCase() === item.name.toLowerCase()) ||
         (item.parentName && i.linkedArtistName && i.linkedArtistName.toLowerCase() === item.parentName.toLowerCase())
       );
@@ -645,6 +661,21 @@ export const DetailItemModal: React.FC<DetailItemModalProps> = ({
     ...formData,
     tags: formData.tags || item.tags || [],
     segments: formData.segments || item.segments || []
+  };
+
+  const audioFileMissing = Boolean(isAudioMissing?.(item));
+  const uploadStateForThisItem = audioUploadState.itemId === item.id ? audioUploadState : { busy: false } as typeof audioUploadState;
+
+  const handleReplaceAudioFile = async (target: MusicItem, file: File) => {
+    if (!onReplaceAudio) return;
+    setAudioUploadState({ itemId: item.id, busy: true, message: `Saving ${file.name}…` });
+    const result = await onReplaceAudio(target, file);
+    setAudioUploadState({
+      itemId: item.id,
+      busy: false,
+      message: target.id === item.id ? result.message : `${target.name}: ${result.message}`,
+      error: !result.ok,
+    });
   };
 
   const isThisItemActive = Boolean(
@@ -1136,28 +1167,64 @@ export const DetailItemModal: React.FC<DetailItemModalProps> = ({
                 </div>
 
                 <label 
-                  className="p-2 hover:bg-emerald-500/20 text-emerald-400 rounded-lg cursor-pointer transition-colors shrink-0" 
-                  title="Attach or sync MP3 audio file to this excerpt on this device"
+                  className={cn(
+                    "p-2 rounded-lg cursor-pointer transition-colors shrink-0 flex items-center gap-1 text-xs font-semibold",
+                    audioFileMissing
+                      ? "bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/40"
+                      : "hover:bg-emerald-500/20 text-emerald-400"
+                  )}
+                  title="Re-upload / replace this excerpt's audio file (demarcated excerpt timings are kept)"
                 >
                   <Upload className="h-4 w-4" />
+                  <span className="hidden sm:inline">{audioFileMissing ? 'Re-upload MP3' : 'Replace audio'}</span>
                   <input
                     type="file"
                     accept="audio/*,.mp3,.wav,.ogg,.m4a,.flac,.aac"
                     className="hidden"
                     onChange={async (e) => {
                       const file = e.target.files?.[0];
+                      e.target.value = '';
                       if (!file) return;
-                      const dur = await getAudioDuration(file);
-                      await saveAudioFile(item.id, file, file.name, file.type, dur);
-                      queueUpdate({
-                        audioFileName: file.name,
-                        audioDuration: dur,
-                        durationSeconds: dur,
-                      }, true);
+                      await handleReplaceAudioFile(item, file);
                     }}
                   />
                 </label>
               </div>
+
+              {audioFileMissing && !uploadStateForThisItem.busy && (
+                <div className="flex items-start gap-3 bg-amber-500/10 border border-amber-500/40 text-amber-300 p-3 rounded-xl text-xs">
+                  <div className="flex-1 space-y-1">
+                    <p className="font-semibold">Audio file missing on this device</p>
+                    <p className="text-amber-200/80">
+                      {item.audioFileName ? <>The file <span className="font-mono">{item.audioFileName}</span> is no longer in this browser's storage. </> : <>No audio file is stored for this excerpt in this browser. </>}
+                      Re-upload the MP3 — all {(activeItemMerged.segments || []).length} demarcated excerpt(s) and their timings will be kept.
+                    </p>
+                  </div>
+                  <label className="shrink-0 px-2.5 py-1.5 rounded-lg font-semibold bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 cursor-pointer">
+                    Re-upload MP3
+                    <input
+                      type="file"
+                      accept="audio/*,.mp3,.wav,.ogg,.m4a,.flac,.aac"
+                      className="hidden"
+                      onChange={async (e) => {
+                        const file = e.target.files?.[0];
+                        e.target.value = '';
+                        if (!file) return;
+                        await handleReplaceAudioFile(item, file);
+                      }}
+                    />
+                  </label>
+                </div>
+              )}
+
+              {uploadStateForThisItem.message && (
+                <p className={cn(
+                  "text-xs px-1",
+                  uploadStateForThisItem.error ? "text-amber-300" : "text-emerald-400"
+                )}>
+                  {uploadStateForThisItem.message}
+                </p>
+              )}
 
               {/* Demarcated Excerpts & Timings Section */}
               <div className="space-y-3 pt-1">
@@ -1251,42 +1318,6 @@ export const DetailItemModal: React.FC<DetailItemModalProps> = ({
                               className="flex-1 min-w-0 bg-brand-bg border border-brand-border/80 rounded-lg px-2.5 py-1.5 text-xs font-semibold text-brand-text focus:border-emerald-400 outline-none"
                             />
 
-                            {/* Start Time */}
-                            <div className="flex items-center gap-1 shrink-0">
-                              <span className="text-[10px] text-brand-muted font-mono">From:</span>
-                              <input
-                                type="text"
-                                defaultValue={formatAudioDuration(seg.startTime)}
-                                key={`start_${seg.id}_${seg.startTime}`}
-                                onBlur={(e) => {
-                                  const sec = parseTimeToSeconds(e.target.value, 0);
-                                  const updated = (formData.segments || []).map(s => s.id === seg.id ? { ...s, startTime: sec } : s);
-                                  queueUpdate({ segments: updated }, true);
-                                }}
-                                placeholder="0:00"
-                                className="w-14 bg-brand-bg border border-brand-border/80 rounded-lg px-1.5 py-1.5 text-xs font-mono text-center text-brand-text focus:border-emerald-400 outline-none"
-                                title="Start time (e.g. 0:14)"
-                              />
-                            </div>
-
-                            {/* End Time */}
-                            <div className="flex items-center gap-1 shrink-0">
-                              <span className="text-[10px] text-brand-muted font-mono">To:</span>
-                              <input
-                                type="text"
-                                defaultValue={formatAudioDuration(seg.endTime)}
-                                key={`end_${seg.id}_${seg.endTime}`}
-                                onBlur={(e) => {
-                                  const sec = parseTimeToSeconds(e.target.value, item.audioDuration || 30);
-                                  const updated = (formData.segments || []).map(s => s.id === seg.id ? { ...s, endTime: sec } : s);
-                                  queueUpdate({ segments: updated }, true);
-                                }}
-                                placeholder="0:38"
-                                className="w-14 bg-brand-bg border border-brand-border/80 rounded-lg px-1.5 py-1.5 text-xs font-mono text-center text-brand-text focus:border-emerald-400 outline-none"
-                                title="End time (e.g. 0:38)"
-                              />
-                            </div>
-
                             {(formData.segments || []).length > 1 && (
                               <button
                                 type="button"
@@ -1301,6 +1332,59 @@ export const DetailItemModal: React.FC<DetailItemModalProps> = ({
                               </button>
                             )}
                           </div>
+
+                          {/* Millisecond-precise timings */}
+                          <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+                            <div className="flex items-center gap-1">
+                              <span className="text-[10px] text-brand-muted font-mono">From:</span>
+                              <PreciseTimeInput
+                                value={seg.startTime}
+                                onChange={(sec) => {
+                                  const updated = (formData.segments || []).map(s => s.id === seg.id ? { ...s, startTime: sec } : s);
+                                  queueUpdate({ segments: updated }, true);
+                                }}
+                                max={item.audioDuration || item.durationSeconds || undefined}
+                                title="Start time (m:ss.mmm)"
+                                inputClassName="w-[5.75rem] bg-brand-bg border border-brand-border/80 rounded-lg px-1.5 py-1.5 text-xs text-brand-text focus:border-emerald-400 outline-none"
+                                buttonClassName="text-brand-muted hover:text-emerald-400 hover:bg-brand-bg"
+                              />
+                            </div>
+                            <div className="flex items-center gap-1">
+                              <span className="text-[10px] text-brand-muted font-mono">To:</span>
+                              <PreciseTimeInput
+                                value={seg.endTime}
+                                onChange={(sec) => {
+                                  const updated = (formData.segments || []).map(s => s.id === seg.id ? { ...s, endTime: sec } : s);
+                                  queueUpdate({ segments: updated }, true);
+                                }}
+                                max={item.audioDuration || item.durationSeconds || undefined}
+                                title="End time (m:ss.mmm)"
+                                inputClassName="w-[5.75rem] bg-brand-bg border border-brand-border/80 rounded-lg px-1.5 py-1.5 text-xs text-brand-text focus:border-emerald-400 outline-none"
+                                buttonClassName="text-brand-muted hover:text-emerald-400 hover:bg-brand-bg"
+                              />
+                            </div>
+                            <span className="text-[10px] text-brand-muted font-mono">
+                              = {formatPreciseTime(Math.max(0, seg.endTime - seg.startTime))}
+                            </span>
+                          </div>
+
+                          {/* Excerpt-specific artist */}
+                          <ArtistPicker
+                            variant="brand"
+                            artists={libraryArtists}
+                            knownNames={existingArtistNames}
+                            valueId={seg.artistId}
+                            valueName={seg.artistName || ''}
+                            onChange={({ id, name }) => {
+                              const updated = (formData.segments || []).map(s => {
+                                if (s.id !== seg.id) return s;
+                                const { artistId: _id, artistName: _name, ...rest } = s;
+                                return name ? { ...rest, artistName: name, ...(id ? { artistId: id } : {}) } : rest;
+                              });
+                              queueUpdate({ segments: updated });
+                            }}
+                            placeholder={formData.linkedArtistName ? `Excerpt artist — defaults to ${formData.linkedArtistName}` : 'Excerpt artist — search library or type a new one...'}
+                          />
 
                           <input
                             type="text"
@@ -1619,6 +1703,15 @@ export const DetailItemModal: React.FC<DetailItemModalProps> = ({
                 </Button>
               </div>
 
+              {uploadStateForThisItem.message && (
+                <p className={cn(
+                  "text-xs px-1",
+                  uploadStateForThisItem.error ? "text-amber-300" : "text-emerald-400"
+                )}>
+                  {uploadStateForThisItem.message}
+                </p>
+              )}
+
               {linkedExcerpts.length > 0 ? (
                 <div className="space-y-2">
                   {linkedExcerpts.map(excerpt => {
@@ -1643,6 +1736,11 @@ export const DetailItemModal: React.FC<DetailItemModalProps> = ({
                           <div className="min-w-0">
                             <div className="flex items-center gap-2">
                               <span className="font-semibold text-sm text-brand-text truncate">{excerpt.name}</span>
+                              {isAudioMissing?.(excerpt) && (
+                                <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-amber-500/15 border border-amber-500/40 text-amber-300 font-bold shrink-0">
+                                  audio missing
+                                </span>
+                              )}
                               {excerpt.isLooping && (
                                 <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 font-bold shrink-0">
                                   🔁 Loop
@@ -1663,6 +1761,33 @@ export const DetailItemModal: React.FC<DetailItemModalProps> = ({
                         </div>
 
                         <div className="flex items-center gap-1.5 shrink-0">
+                          {onReplaceAudio && (
+                            <label
+                              className={cn(
+                                "px-2 py-1 text-xs font-semibold rounded-lg transition cursor-pointer flex items-center gap-1 border",
+                                isAudioMissing?.(excerpt)
+                                  ? "bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border-amber-500/40"
+                                  : "bg-brand-bg hover:bg-brand-border/60 text-brand-muted hover:text-emerald-400 border-transparent"
+                              )}
+                              title={isAudioMissing?.(excerpt)
+                                ? "Audio file missing on this device — re-upload the MP3 (excerpt timings are kept)"
+                                : "Replace / re-upload this excerpt's audio file (excerpt timings are kept)"}
+                            >
+                              <Upload className="h-3.5 w-3.5" />
+                              {isAudioMissing?.(excerpt) && <span>Re-upload</span>}
+                              <input
+                                type="file"
+                                accept="audio/*,.mp3,.wav,.ogg,.m4a,.flac,.aac"
+                                className="hidden"
+                                onChange={async (e) => {
+                                  const file = e.target.files?.[0];
+                                  e.target.value = '';
+                                  if (!file) return;
+                                  await handleReplaceAudioFile(excerpt, file);
+                                }}
+                              />
+                            </label>
+                          )}
                           <button
                             type="button"
                             onClick={() => onSelectItem?.(excerpt)}

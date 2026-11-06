@@ -1,7 +1,9 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Upload, X, Music, User, Volume2, FileAudio, Tag, Sparkles, Star, Play, Pause, Repeat, Check, Loader2, Plus, Trash2, Clock, Scissors, CornerDownRight } from 'lucide-react';
 import { MusicItem, TagCluster, AudioSegment } from '../types';
-import { getAudioDuration, formatAudioDuration, parseTimeToSeconds } from '../lib/audioDb';
+import { getAudioDuration, formatAudioDuration, formatPreciseTime, roundToMs } from '../lib/audioDb';
+import { PreciseTimeInput } from './PreciseTimeInput';
+import { ArtistPicker } from './ArtistPicker';
 
 interface ExcerptUploadModalProps {
   isOpen: boolean;
@@ -9,6 +11,7 @@ interface ExcerptUploadModalProps {
   onSave: (excerptData: Partial<MusicItem>, audioFile?: File) => Promise<void>;
   availableArtists: MusicItem[];
   availableTracks: MusicItem[];
+  knownArtistNames?: string[];
   presetArtistName?: string;
   presetArtistId?: string;
   presetTrackName?: string;
@@ -22,6 +25,7 @@ export const ExcerptUploadModal: React.FC<ExcerptUploadModalProps> = ({
   onSave,
   availableArtists,
   availableTracks,
+  knownArtistNames = [],
   presetArtistName,
   presetArtistId,
   presetTrackName,
@@ -42,8 +46,10 @@ export const ExcerptUploadModal: React.FC<ExcerptUploadModalProps> = ({
   const [segments, setSegments] = useState<Array<{
     id: string;
     name: string;
-    startTimeInput: string;
-    endTimeInput: string;
+    startTime: number; // seconds, ms precision
+    endTime: number; // seconds, ms precision (0 = not set yet)
+    artistId?: string;
+    artistName?: string;
     comments: string;
     tags: string[];
     tagInputDraft?: string;
@@ -51,8 +57,8 @@ export const ExcerptUploadModal: React.FC<ExcerptUploadModalProps> = ({
     {
       id: 'seg_1',
       name: 'Main Excerpt',
-      startTimeInput: '0:00',
-      endTimeInput: '0:00',
+      startTime: 0,
+      endTime: 0,
       comments: '',
       tags: [],
       tagInputDraft: '',
@@ -105,6 +111,35 @@ export const ExcerptUploadModal: React.FC<ExcerptUploadModalProps> = ({
     };
   }, [previewUrl]);
 
+  // While auditioning, watch the excerpt's end boundary every animation frame so
+  // millisecond timings are honoured (timeupdate only fires ~4x per second).
+  useEffect(() => {
+    if (!isPlayingPreview || !activeAuditionSegmentId) return;
+    let rafId = 0;
+    const tick = () => {
+      const audio = audioPreviewRef.current;
+      const seg = segments.find(s => s.id === activeAuditionSegmentId);
+      if (audio && seg) {
+        const end = seg.endTime > seg.startTime ? seg.endTime : (duration || Infinity);
+        if (audio.currentTime >= end) {
+          if (isLoopingPreview) {
+            audio.currentTime = seg.startTime;
+          } else {
+            audio.pause();
+            audio.currentTime = end;
+            setPreviewCurrentTime(end);
+            setIsPlayingPreview(false);
+            setActiveAuditionSegmentId(null);
+            return;
+          }
+        }
+      }
+      rafId = requestAnimationFrame(tick);
+    };
+    rafId = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafId);
+  }, [isPlayingPreview, activeAuditionSegmentId, segments, duration, isLoopingPreview]);
+
   if (!isOpen) return null;
 
   const handleFileProcess = async (selectedFile: File) => {
@@ -128,10 +163,10 @@ export const ExcerptUploadModal: React.FC<ExcerptUploadModalProps> = ({
       
       // Update first segment end time if it was 0:00
       setSegments(prev => {
-        if (prev.length === 1 && (prev[0].endTimeInput === '0:00' || prev[0].endTimeInput === '0')) {
+        if (prev.length === 1 && prev[0].endTime <= 0) {
           return [{
             ...prev[0],
-            endTimeInput: formatAudioDuration(dur),
+            endTime: roundToMs(dur),
           }];
         }
         return prev;
@@ -189,7 +224,7 @@ export const ExcerptUploadModal: React.FC<ExcerptUploadModalProps> = ({
     const seg = segments.find(s => s.id === segmentId);
     if (!seg) return;
 
-    const start = parseTimeToSeconds(seg.startTimeInput, 0);
+    const start = seg.startTime;
     
     if (activeAuditionSegmentId === segmentId && isPlayingPreview) {
       audioPreviewRef.current.pause();
@@ -209,16 +244,16 @@ export const ExcerptUploadModal: React.FC<ExcerptUploadModalProps> = ({
     const nextIdx = segments.length + 1;
     // Suggest next segment starting at current preview time or last segment's end time
     const lastSeg = segments[segments.length - 1];
-    const suggestedStart = lastSeg ? parseTimeToSeconds(lastSeg.endTimeInput, 0) : previewCurrentTime;
-    const suggestedEnd = duration > suggestedStart ? Math.min(duration, suggestedStart + 15) : (suggestedStart + 10);
+    const suggestedStart = roundToMs(lastSeg ? lastSeg.endTime : previewCurrentTime);
+    const suggestedEnd = roundToMs(duration > suggestedStart ? Math.min(duration, suggestedStart + 15) : (suggestedStart + 10));
 
     setSegments(prev => [
       ...prev,
       {
         id: `seg_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`,
         name: `Excerpt ${nextIdx}`,
-        startTimeInput: formatAudioDuration(suggestedStart),
-        endTimeInput: formatAudioDuration(suggestedEnd),
+        startTime: suggestedStart,
+        endTime: suggestedEnd,
         comments: '',
         tags: [],
         tagInputDraft: '',
@@ -235,12 +270,15 @@ export const ExcerptUploadModal: React.FC<ExcerptUploadModalProps> = ({
     setSegments(prev => prev.map(s => s.id === id ? { ...s, ...updates } : s));
   };
 
+  // Read the playhead straight from the element: state only refreshes on timeupdate (~4x/sec)
+  const getExactPlayhead = () => roundToMs(audioPreviewRef.current?.currentTime ?? previewCurrentTime);
+
   const handleSetSegmentStartFromPlayhead = (id: string) => {
-    handleUpdateSegment(id, { startTimeInput: formatAudioDuration(previewCurrentTime) });
+    handleUpdateSegment(id, { startTime: getExactPlayhead() });
   };
 
   const handleSetSegmentEndFromPlayhead = (id: string) => {
-    handleUpdateSegment(id, { endTimeInput: formatAudioDuration(previewCurrentTime) });
+    handleUpdateSegment(id, { endTime: getExactPlayhead() });
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -263,10 +301,10 @@ export const ExcerptUploadModal: React.FC<ExcerptUploadModalProps> = ({
 
       // Convert UI segments to standard AudioSegment[] without undefined fields
       const cleanSegments: AudioSegment[] = segments.map((s, idx) => {
-        const startSec = parseTimeToSeconds(s.startTimeInput, 0);
-        let endSec = parseTimeToSeconds(s.endTimeInput, duration || 30);
+        const startSec = roundToMs(s.startTime);
+        let endSec = roundToMs(s.endTime > 0 ? s.endTime : (duration || 30));
         if (endSec <= startSec) {
-          endSec = duration > startSec ? duration : startSec + 10;
+          endSec = roundToMs(duration > startSec ? duration : startSec + 10);
         }
 
         // Collect all individual tags for this segment (including any pending text in draft input)
@@ -285,6 +323,11 @@ export const ExcerptUploadModal: React.FC<ExcerptUploadModalProps> = ({
           startTime: startSec,
           endTime: endSec,
         };
+        const segArtistName = (s.artistName || '').trim();
+        if (segArtistName) {
+          segObj.artistName = segArtistName;
+          if (s.artistId) segObj.artistId = s.artistId;
+        }
         const trimmedComment = s.comments.trim();
         if (trimmedComment) {
           segObj.comments = trimmedComment;
@@ -449,26 +492,8 @@ export const ExcerptUploadModal: React.FC<ExcerptUploadModalProps> = ({
                 loop={isLoopingPreview}
                 onTimeUpdate={() => {
                   if (audioPreviewRef.current) {
-                    const curr = audioPreviewRef.current.currentTime;
-                    setPreviewCurrentTime(curr);
-
-                    // If auditioning a segment, check loop/end bounds
-                    if (activeAuditionSegmentId) {
-                      const seg = segments.find(s => s.id === activeAuditionSegmentId);
-                      if (seg) {
-                        const start = parseTimeToSeconds(seg.startTimeInput, 0);
-                        const end = parseTimeToSeconds(seg.endTimeInput, duration || 9999);
-                        if (curr >= end) {
-                          if (isLoopingPreview) {
-                            audioPreviewRef.current.currentTime = start;
-                          } else {
-                            audioPreviewRef.current.pause();
-                            setIsPlayingPreview(false);
-                            setActiveAuditionSegmentId(null);
-                          }
-                        }
-                      }
-                    }
+                    // Segment end/loop bounds are enforced by the requestAnimationFrame watcher above
+                    setPreviewCurrentTime(audioPreviewRef.current.currentTime);
                   }
                 }}
                 onEnded={() => {
@@ -493,7 +518,7 @@ export const ExcerptUploadModal: React.FC<ExcerptUploadModalProps> = ({
                     <div className="text-xs font-semibold text-zinc-100 flex items-center gap-2">
                       <span>Audio Playhead</span>
                       <span className="font-mono text-emerald-400 bg-emerald-950/60 px-1.5 py-0.5 rounded border border-emerald-500/30 text-[11px]">
-                        {formatAudioDuration(previewCurrentTime)} / {formatAudioDuration(duration)}
+                        {formatPreciseTime(previewCurrentTime)} / {formatPreciseTime(duration)}
                       </span>
                     </div>
                     <p className="text-[11px] text-zinc-400">Click anywhere on the timeline to scrub and sample timestamps</p>
@@ -525,8 +550,8 @@ export const ExcerptUploadModal: React.FC<ExcerptUploadModalProps> = ({
               >
                 {/* Segment Overlays on timeline */}
                 {duration > 0 && segments.map((seg, idx) => {
-                  const startSec = parseTimeToSeconds(seg.startTimeInput, 0);
-                  const endSec = parseTimeToSeconds(seg.endTimeInput, duration);
+                  const startSec = seg.startTime;
+                  const endSec = seg.endTime > 0 ? seg.endTime : duration;
                   const left = Math.max(0, Math.min(100, (startSec / duration) * 100));
                   const width = Math.max(1, Math.min(100 - left, ((endSec - startSec) / duration) * 100));
                   const isAuditioning = activeAuditionSegmentId === seg.id;
@@ -542,7 +567,7 @@ export const ExcerptUploadModal: React.FC<ExcerptUploadModalProps> = ({
                           : 'bg-teal-500/40 border-x border-teal-400/60'
                       }`}
                       style={{ left: `${left}%`, width: `${width}%` }}
-                      title={`${seg.name}: ${formatAudioDuration(startSec)} - ${formatAudioDuration(endSec)}`}
+                      title={`${seg.name}${seg.artistName ? ` (${seg.artistName})` : ''}: ${formatPreciseTime(startSec)} - ${formatPreciseTime(endSec)}`}
                     />
                   );
                 })}
@@ -586,8 +611,8 @@ export const ExcerptUploadModal: React.FC<ExcerptUploadModalProps> = ({
 
             <div className="space-y-3">
               {segments.map((seg, idx) => {
-                const startSec = parseTimeToSeconds(seg.startTimeInput, 0);
-                const endSec = parseTimeToSeconds(seg.endTimeInput, duration || 30);
+                const startSec = seg.startTime;
+                const endSec = seg.endTime > 0 ? seg.endTime : (duration || 30);
                 const segDuration = Math.max(0, endSec - startSec);
                 const isAuditioning = activeAuditionSegmentId === seg.id && isPlayingPreview;
 
@@ -623,7 +648,7 @@ export const ExcerptUploadModal: React.FC<ExcerptUploadModalProps> = ({
                               ? 'bg-emerald-500 text-zinc-950 shadow-md shadow-emerald-500/40'
                               : 'bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30 border border-emerald-500/30'
                           }`}
-                          title={isAuditioning ? "Pause audition" : `Play excerpt from ${seg.startTimeInput} to ${seg.endTimeInput}`}
+                          title={isAuditioning ? "Pause audition" : `Play excerpt from ${formatPreciseTime(startSec)} to ${formatPreciseTime(endSec)}`}
                         >
                           {isAuditioning ? (
                             <>
@@ -651,7 +676,7 @@ export const ExcerptUploadModal: React.FC<ExcerptUploadModalProps> = ({
                       </div>
                     </div>
 
-                    {/* Timing demarcation inputs */}
+                    {/* Timing demarcation inputs (millisecond precision) */}
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
                       {/* Start Time Demarcation */}
                       <div className="bg-zinc-950/60 p-2.5 rounded-lg border border-zinc-800 space-y-1.5">
@@ -665,21 +690,22 @@ export const ExcerptUploadModal: React.FC<ExcerptUploadModalProps> = ({
                               type="button"
                               onClick={() => handleSetSegmentStartFromPlayhead(seg.id)}
                               className="text-[10.5px] text-emerald-400 hover:text-emerald-300 underline font-mono cursor-pointer"
-                              title={`Set start time to current playhead (${formatAudioDuration(previewCurrentTime)})`}
+                              title="Set start time to the exact current playhead position"
                             >
-                              ⏱ Use Playhead ({formatAudioDuration(previewCurrentTime)})
+                              ⏱ Use Playhead ({formatPreciseTime(previewCurrentTime)})
                             </button>
                           )}
                         </div>
                         <div className="flex items-center gap-2">
-                          <input
-                            type="text"
-                            value={seg.startTimeInput}
-                            onChange={(e) => handleUpdateSegment(seg.id, { startTimeInput: e.target.value })}
-                            placeholder="0:14"
-                            className="w-full bg-zinc-800 border border-zinc-700 rounded-md px-2.5 py-1 text-xs font-mono text-zinc-100 focus:outline-none focus:border-emerald-400"
+                          <PreciseTimeInput
+                            value={seg.startTime}
+                            onChange={(sec) => handleUpdateSegment(seg.id, { startTime: sec })}
+                            max={duration || undefined}
+                            title="Start time (m:ss.mmm)"
+                            className="flex-1"
+                            inputClassName="w-full bg-zinc-800 border border-zinc-700 rounded-md px-2 py-1 text-xs text-zinc-100 focus:outline-none focus:border-emerald-400"
                           />
-                          <span className="text-[10px] text-zinc-500 font-mono shrink-0">m:ss</span>
+                          <span className="text-[10px] text-zinc-500 font-mono shrink-0">m:ss.ms</span>
                         </div>
                       </div>
 
@@ -695,25 +721,47 @@ export const ExcerptUploadModal: React.FC<ExcerptUploadModalProps> = ({
                               type="button"
                               onClick={() => handleSetSegmentEndFromPlayhead(seg.id)}
                               className="text-[10.5px] text-teal-400 hover:text-teal-300 underline font-mono cursor-pointer"
-                              title={`Set end time to current playhead (${formatAudioDuration(previewCurrentTime)})`}
+                              title="Set end time to the exact current playhead position"
                             >
-                              ⏱ Use Playhead ({formatAudioDuration(previewCurrentTime)})
+                              ⏱ Use Playhead ({formatPreciseTime(previewCurrentTime)})
                             </button>
                           )}
                         </div>
                         <div className="flex items-center gap-2">
-                          <input
-                            type="text"
-                            value={seg.endTimeInput}
-                            onChange={(e) => handleUpdateSegment(seg.id, { endTimeInput: e.target.value })}
-                            placeholder="0:38"
-                            className="w-full bg-zinc-800 border border-zinc-700 rounded-md px-2.5 py-1 text-xs font-mono text-zinc-100 focus:outline-none focus:border-teal-400"
+                          <PreciseTimeInput
+                            value={endSec}
+                            onChange={(sec) => handleUpdateSegment(seg.id, { endTime: sec })}
+                            max={duration || undefined}
+                            title="End time (m:ss.mmm)"
+                            className="flex-1"
+                            inputClassName="w-full bg-zinc-800 border border-zinc-700 rounded-md px-2 py-1 text-xs text-zinc-100 focus:outline-none focus:border-teal-400"
                           />
                           <span className="text-[10px] text-zinc-400 font-mono font-bold shrink-0 bg-zinc-800 px-1.5 py-0.5 rounded">
-                            {formatAudioDuration(segDuration)} loop
+                            {formatPreciseTime(segDuration)} loop
                           </span>
                         </div>
                       </div>
+                    </div>
+
+                    {/* Excerpt-specific artist (can differ from the card's linked artist) */}
+                    <div className="mt-2.5 space-y-1">
+                      <label className="text-xs font-semibold text-zinc-200 flex items-center gap-1.5">
+                        <User className="w-3.5 h-3.5 text-emerald-400" />
+                        <span>Excerpt Artist</span>
+                        <span className="text-[10.5px] text-zinc-400 font-normal">
+                          {selectedArtistName.trim()
+                            ? `(leave empty to use card artist: ${selectedArtistName.trim()})`
+                            : '(optional — who plays on this excerpt)'}
+                        </span>
+                      </label>
+                      <ArtistPicker
+                        artists={availableArtists}
+                        knownNames={knownArtistNames}
+                        valueId={seg.artistId}
+                        valueName={seg.artistName || ''}
+                        onChange={({ id, name }) => handleUpdateSegment(seg.id, { artistId: id, artistName: name })}
+                        placeholder={selectedArtistName.trim() ? `${selectedArtistName.trim()} (card artist)` : 'Search library or type a new artist...'}
+                      />
                     </div>
 
                     {/* Excerpt specific comments */}
@@ -892,6 +940,8 @@ export const ExcerptUploadModal: React.FC<ExcerptUploadModalProps> = ({
                     type="text"
                     value={selectedArtistName}
                     onFocus={() => setShowArtistDropdown(true)}
+                    onBlur={() => setShowArtistDropdown(false)}
+                    onKeyDown={(e) => { if (e.key === 'Escape') setShowArtistDropdown(false); }}
                     onChange={(e) => {
                       setSelectedArtistName(e.target.value);
                       setArtistSearch(e.target.value);
@@ -919,7 +969,7 @@ export const ExcerptUploadModal: React.FC<ExcerptUploadModalProps> = ({
                 </div>
 
                 {showArtistDropdown && filteredArtists.length > 0 && (
-                  <div className="absolute z-20 top-full left-0 right-0 mt-1 bg-zinc-800 border border-zinc-700 rounded-lg shadow-xl max-h-40 overflow-y-auto">
+                  <div onMouseDown={(e) => e.preventDefault()} className="absolute z-20 top-full left-0 right-0 mt-1 bg-zinc-800 border border-zinc-700 rounded-lg shadow-xl max-h-40 overflow-y-auto">
                     {filteredArtists.slice(0, 8).map((artist) => (
                       <div
                         key={artist.id}
@@ -949,6 +999,8 @@ export const ExcerptUploadModal: React.FC<ExcerptUploadModalProps> = ({
                     type="text"
                     value={selectedTrackName}
                     onFocus={() => setShowTrackDropdown(true)}
+                    onBlur={() => setShowTrackDropdown(false)}
+                    onKeyDown={(e) => { if (e.key === 'Escape') setShowTrackDropdown(false); }}
                     onChange={(e) => {
                       setSelectedTrackName(e.target.value);
                       setTrackSearch(e.target.value);
@@ -980,7 +1032,7 @@ export const ExcerptUploadModal: React.FC<ExcerptUploadModalProps> = ({
                 </div>
 
                 {showTrackDropdown && filteredTracks.length > 0 && (
-                  <div className="absolute z-20 top-full left-0 right-0 mt-1 bg-zinc-800 border border-zinc-700 rounded-lg shadow-xl max-h-40 overflow-y-auto">
+                  <div onMouseDown={(e) => e.preventDefault()} className="absolute z-20 top-full left-0 right-0 mt-1 bg-zinc-800 border border-zinc-700 rounded-lg shadow-xl max-h-40 overflow-y-auto">
                     {filteredTracks.slice(0, 8).map((track) => (
                       <div
                         key={track.id}

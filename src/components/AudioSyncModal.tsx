@@ -20,6 +20,7 @@ import {
 import { 
   getAllStoredAudioRecords, 
   getStoredAudioIds, 
+  getAudioKeyCandidates,
   exportAudioVaultZip, 
   importAudioVaultZip, 
   matchAndImportAudioFiles,
@@ -80,7 +81,7 @@ export function AudioSyncModal({
   const totalBytes = storedRecords.reduce((acc, r) => acc + (r.blob?.size || 0), 0);
   const totalMb = (totalBytes / (1024 * 1024)).toFixed(1);
 
-  const availableLocallyCount = excerptItems.filter(i => storedIds.has(i.audioStorageKey || i.id)).length;
+  const availableLocallyCount = excerptItems.filter(i => getAudioKeyCandidates(i).some(k => storedIds.has(k))).length;
   const missingLocallyCount = Math.max(0, excerptItems.length - availableLocallyCount);
 
   const handleExportZip = async () => {

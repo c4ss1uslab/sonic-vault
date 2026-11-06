@@ -2,11 +2,19 @@ export type ItemType = 'artist' | 'album' | 'playlist' | 'track' | 'excerpt';
 
 export type LastFmPeriod = 'overall' | '7day' | '1month' | '3month' | '6month' | '12month';
 
+export interface ListenLogEntry {
+  at: number; // epoch ms
+  scope: 'segment' | 'card'; // an individual excerpt vs the full card
+  segmentId?: string;
+}
+
 export interface AudioSegment {
   id: string;
   name: string; // e.g. "Intro riff", "Guitar solo", "Hook", or "Excerpt 1"
-  startTime: number; // in seconds (e.g. 14 for 0:14)
-  endTime: number; // in seconds (e.g. 38 for 0:38)
+  startTime: number; // in seconds, millisecond precision (e.g. 14.125 for 0:14.125)
+  endTime: number; // in seconds, millisecond precision (e.g. 38.25 for 0:38.250)
+  artistId?: string; // Excerpt-specific artist (library artist card id), may differ from the card's linked artist
+  artistName?: string; // Excerpt-specific artist name (may not exist in the library)
   comments?: string; // Commentary or feedback for this specific demarcated section
   tags?: string[];
 }
@@ -67,6 +75,7 @@ export interface MusicItem {
   linkedTrackId?: string;
   linkedTrackName?: string;
   isLooping?: boolean;
+  listenLog?: ListenLogEntry[]; // Listens longer than 50% of an excerpt / card's length
   comments?: string; // Excerpt commentary and feedback
   parentItemId?: string; // If this item represents an individual segment of an excerpt
   originalSegmentId?: string; // ID of the specific segment if rendered individually

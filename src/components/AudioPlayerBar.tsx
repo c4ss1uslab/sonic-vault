@@ -1,7 +1,9 @@
 import React, { useState } from 'react';
 import { Play, Pause, Repeat, Repeat1, Volume2, VolumeX, X, Music, User as UserIcon, SkipBack, SkipForward, Scissors, ChevronDown, ListMusic, Trash2 } from 'lucide-react';
+import { ListenCountBadge, getListenEntries } from './ListenCountBadge';
+import type { ListenLogEntry } from '../types';
 import { MusicItem, AudioSegment } from '../types';
-import { formatAudioDuration } from '../lib/audioDb';
+import { formatAudioDuration, formatPreciseTime } from '../lib/audioDb';
 
 interface AudioPlayerBarProps {
   item: MusicItem | null;
@@ -32,6 +34,8 @@ interface AudioPlayerBarProps {
   onToggleLoopMode?: () => void;
   onPrevLoopItem?: () => void;
   onNextLoopItem?: () => void;
+  // Fresh listen log of the playing card (from the library, not the possibly stale item snapshot)
+  listenLog?: ListenLogEntry[];
 }
 
 export const AudioPlayerBar: React.FC<AudioPlayerBarProps> = ({
@@ -58,6 +62,7 @@ export const AudioPlayerBar: React.FC<AudioPlayerBarProps> = ({
   isLoopPlaylistActive = false,
   loopMode = 'sequence',
   onSelectLoopPlaylistItem,
+  listenLog,
   onRemoveFromLoopPlaylist,
   onToggleLoopMode,
   onPrevLoopItem,
@@ -127,6 +132,10 @@ export const AudioPlayerBar: React.FC<AudioPlayerBarProps> = ({
               >
                 {item.name}
               </span>
+              {activeSegmentId && (item.segments?.length || 0) > 0 && (
+                <ListenCountBadge compact label="Excerpt" entries={getListenEntries(listenLog ?? item.listenLog, activeSegmentId)} />
+              )}
+              <ListenCountBadge compact label="Card" entries={getListenEntries(listenLog ?? item.listenLog, null)} />
               {/* Multi-Excerpt Loop Sequence Badge & Queue Dropdown */}
               {hasMultiLoop && (
                 <div className="relative shrink-0">
@@ -274,7 +283,18 @@ export const AudioPlayerBar: React.FC<AudioPlayerBarProps> = ({
               {activeSegment && segments.length > 0 ? (
                 <span className="text-emerald-400 font-medium truncate flex items-center gap-1.5">
                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse shrink-0" />
-                  <span className="truncate">{activeSegment.name} ({formatAudioDuration(activeSegment.startTime)} - {formatAudioDuration(activeSegment.endTime)})</span>
+                  <span className="truncate">{activeSegment.name} ({formatPreciseTime(activeSegment.startTime)} - {formatPreciseTime(activeSegment.endTime)})</span>
+                  {activeSegment.artistName && (
+                    <button
+                      type="button"
+                      onClick={() => onNavigateToArtist && onNavigateToArtist(activeSegment.artistName!)}
+                      className="inline-flex items-center gap-1 hover:text-emerald-300 transition truncate underline-offset-2 hover:underline shrink-0"
+                      title="Excerpt artist"
+                    >
+                      <UserIcon className="w-3 h-3 text-emerald-400 shrink-0" />
+                      <span className="truncate">{activeSegment.artistName}</span>
+                    </button>
+                  )}
                   {activeSegment.tags && activeSegment.tags.length > 0 && (
                     <span className="hidden sm:inline-flex items-center gap-1 ml-1 truncate">
                       {activeSegment.tags.slice(0, 3).map(t => (

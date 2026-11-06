@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { 
   collection, 
   query, 
@@ -17,7 +17,7 @@ import {
 import { onAuthStateChanged, signInWithPopup, signInWithRedirect, getRedirectResult, GoogleAuthProvider, signOut, User } from 'firebase/auth';
 import { auth, db, handleFirestoreError, OperationType, deepCleanForFirestore } from './lib/firebase';
 import { getDocFromServer, doc as firestoreDoc } from 'firebase/firestore';
-import { MusicItem, ItemType, TagCluster, LastFmSettings, AudioSegment } from './types';
+import { MusicItem, ItemType, TagCluster, LastFmSettings, AudioSegment, ListenLogEntry } from './types';
 import { AudioWaveform, Library, Plus, Search, Filter, LogOut, Music, User as UserIcon, Disc, ListMusic, Tag, Star, ChevronRight, ChevronLeft, ChevronDown, ChevronUp, PanelLeftClose, PanelLeftOpen, Menu, Share2, Download, Trash2, X, ExternalLink, Upload, FileSpreadsheet, CheckSquare, Square, Edit3, Image as ImageIcon, RefreshCw, Sparkles, Layers, HelpCircle, Minus, GripVertical, ArrowUp, ArrowDown, Move, LayoutGrid, Grid3x3, LayoutList, Globe, RotateCcw, FileText, Copy, Check, Radio, Palette, Clock, Volume2, VolumeX, Volume1, Play, Pause, Repeat, Repeat1, Headphones, Mic, MessageSquare, Paperclip, Link2, Unlink, Music2, Scissors, Pencil, FolderSync } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { cn } from './lib/utils';
@@ -26,11 +26,12 @@ import { DetailItemModal } from './components/DetailItemModal';
 import { LastFmSyncModal } from './components/LastFmSyncModal';
 import { ClusterColorModal, ClusterColorGrid } from './components/ClusterColorPicker';
 import { AudioPlayerBar } from './components/AudioPlayerBar';
+import { ListenCountBadge, getItemListenEntries } from './components/ListenCountBadge';
 import { ExcerptUploadModal } from './components/ExcerptUploadModal';
 import { AudioSyncModal } from './components/AudioSyncModal';
 import { getClusterColor, CLUSTER_COLOR_PALETTE } from './lib/clusterColors';
 import { enrichArtistFromLastFm, enrichTrackFromLastFm, enrichAlbumFromLastFm, fetchItemArtwork, fetchArtistPicture, fetchAlbumCover, fetchTrackCover, getTimeframeShortLabel, getTimeframeFullLabel } from './lib/lastfm';
-import { getAudioBlob, saveAudioBlob, deleteAudioBlob, synthesizeDemoAudio, formatAudioDuration, parseTimeToSeconds } from './lib/audioDb';
+import { getAudioBlob, saveAudioBlob, deleteAudioBlob, synthesizeDemoAudio, formatAudioDuration, formatPreciseTime, parseTimeToSeconds, getAudioKeyCandidates, getCanonicalAudioKey, getStoredAudioIds, saveAudioFile, getAudioDuration } from './lib/audioDb';
 import * as XLSX from 'xlsx';
 import ReactMarkdown from 'react-markdown';
 import { INITIAL_DEMO_ITEMS, INITIAL_DEMO_CLUSTERS } from './data/demoDataset';
@@ -1097,6 +1098,17 @@ export default function App() {
   const [audioLoadingId, setAudioLoadingId] = useState<string | null>(null);
   const audioElementRef = useRef<HTMLAudioElement | null>(null);
 
+  // --- Local audio file availability & re-upload ---
+  // Keys of audio files present in this browser's IndexedDB (null = not loaded yet).
+  const [storedAudioKeys, setStoredAudioKeys] = useState<Set<string> | null>(null);
+  const refreshStoredAudioKeys = useCallback(async () => {
+    setStoredAudioKeys(await getStoredAudioIds());
+  }, []);
+  useEffect(() => { refreshStoredAudioKeys(); }, [refreshStoredAudioKeys]);
+
+  const replaceAudioInputRef = useRef<HTMLInputElement | null>(null);
+  const pendingReplaceItemRef = useRef<MusicItem | null>(null);
+
   // Multi-Excerpt Continuous Looping Sequence States
   const [loopPlaylist, setLoopPlaylist] = useState<MusicItem[]>([]);
   const [loopPlaylistIndex, setLoopPlaylistIndex] = useState<number>(0);
@@ -1128,6 +1140,7 @@ export default function App() {
 
   // Excerpt Upload / Management Modal States
   const [isExcerptUploadModalOpen, setIsExcerptUploadModalOpen] = useState(false);
+  const segmentBoundsRafRef = useRef(0);
   const [presetExcerptArtist, setPresetExcerptArtist] = useState<string | undefined>(undefined);
   const [presetExcerptTrack, setPresetExcerptTrack] = useState<string | undefined>(undefined);
   const [presetExcerptArtistId, setPresetExcerptArtistId] = useState<string | undefined>(undefined);
@@ -1467,6 +1480,9 @@ export default function App() {
     }
 
     // Set new audio item
+    const prevAudioItemRef = activeAudioItemRef.current;
+    const prevSegmentIdRef = activeSegmentIdRef.current;
+    const prevSegmentIdState = activeSegmentId;
     setAudioLoadingId(item.id);
     activeAudioItemRef.current = item;
     activeSegmentIdRef.current = chosenSegmentId;
@@ -1479,16 +1495,34 @@ export default function App() {
     try {
       let resolvedSrc = item.audioUrl || '';
 
-      // 1. Try to load from IndexedDB
-      const audioKey = item.audioStorageKey || (item as any).parentItemId || item.id;
-      if (audioKey) {
-        const storedUrl = await getAudioBlob(audioKey);
+      // 1. Try to load from IndexedDB (canonical key first, then legacy keys from older upload paths)
+      const audioKey = getCanonicalAudioKey(item);
+      for (const key of getAudioKeyCandidates(item)) {
+        const storedUrl = await getAudioBlob(key);
         if (storedUrl) {
           resolvedSrc = storedUrl;
+          break;
         }
       }
 
-      // 2. If no audio blob exists and this is a demo excerpt, synthesize rich demo audio
+      // 2. A real (non-demo) excerpt whose audio file is missing on this device:
+      //    don't fake it with synthesized audio — tell the user to re-attach the file.
+      if (!resolvedSrc && !isDemoMode && item.audioStorageKey) {
+        activeAudioItemRef.current = prevAudioItemRef;
+        activeSegmentIdRef.current = prevSegmentIdRef;
+        setActiveSegmentId(prevSegmentIdState);
+        setAudioLoadingId(null);
+        refreshStoredAudioKeys();
+        const wantsReupload = confirm(
+          `The audio file for "${item.parentName || item.name}"${item.audioFileName ? ` (${item.audioFileName})` : ''} is missing on this device.\n\n` +
+          `Re-upload the MP3 now? Your demarcated excerpts and timings will be kept.\n\n` +
+          `(You can also use the upload icon on the excerpt card.)`
+        );
+        if (wantsReupload) openReplaceAudioPicker(item);
+        return;
+      }
+
+      // 3. If no audio blob exists and this is a demo excerpt, synthesize rich demo audio
       if (!resolvedSrc) {
         const synthBlob = synthesizeDemoAudio(
           audioKey,
@@ -1526,8 +1560,7 @@ export default function App() {
         }
       };
 
-      audio.ontimeupdate = () => {
-        setAudioCurrentTime(audio.currentTime);
+      const enforceSegmentBounds = () => {
         const currentItem = activeAudioItemRef.current;
         const currentSegId = activeSegmentIdRef.current;
         let segStartTime = 0;
@@ -1566,6 +1599,30 @@ export default function App() {
         }
       };
 
+      audio.ontimeupdate = () => {
+        setAudioCurrentTime(audio.currentTime);
+        trackListenTickRef.current(audio);
+        enforceSegmentBounds();
+      };
+
+      // timeupdate fires only ~4x/sec; poll every frame while playing so
+      // millisecond-precise excerpt end points are respected.
+      const stopBoundsWatcher = () => {
+        if (segmentBoundsRafRef.current) cancelAnimationFrame(segmentBoundsRafRef.current);
+        segmentBoundsRafRef.current = 0;
+      };
+      const boundsTick = () => {
+        if (audio.paused) { segmentBoundsRafRef.current = 0; return; }
+        enforceSegmentBounds();
+        segmentBoundsRafRef.current = requestAnimationFrame(boundsTick);
+      };
+      stopBoundsWatcher();
+      audio.onplay = () => {
+        stopBoundsWatcher();
+        segmentBoundsRafRef.current = requestAnimationFrame(boundsTick);
+      };
+      audio.onpause = stopBoundsWatcher;
+
       audio.onended = () => {
         if (isLoopPlaylistActiveRef.current && loopPlaylistRef.current.length > 1 && loopModeRef.current === 'sequence') {
           if (!isLoopTransitioningRef.current) {
@@ -1603,6 +1660,155 @@ export default function App() {
     }
   };
 
+  // True when a real (non-demo) excerpt expects an audio file that isn't stored in this browser.
+  const isExcerptAudioMissing = (item: MusicItem): boolean => {
+    if (isDemoMode || item.type !== 'excerpt' || !storedAudioKeys) return false;
+    if (!item.audioStorageKey && !item.audioFileName) return false;
+    return !getAudioKeyCandidates(item).some(k => storedAudioKeys.has(k));
+  };
+
+  // Drop any stale source loaded for this item's audio (e.g. the synthesized placeholder)
+  // so the next play loads the newly attached file.
+  const resetPlayerIfSameAudio = (item: MusicItem) => {
+    const current = activeAudioItemRef.current;
+    if (!current) return;
+    if (getCanonicalAudioKey(current) !== getCanonicalAudioKey(item)) return;
+    if (audioElementRef.current) {
+      audioElementRef.current.pause();
+      audioElementRef.current.removeAttribute('src');
+      audioElementRef.current.load();
+    }
+    activeAudioItemRef.current = null;
+    setActiveAudioItem(null);
+    setIsPlayingAudio(false);
+    setAudioCurrentTime(0);
+  };
+
+  /**
+   * Replace (or re-attach) the audio file of an existing excerpt.
+   * Only the stored file and file metadata change — demarcated segments & timings are kept.
+   */
+  const handleReplaceExcerptAudio = async (item: MusicItem, file: File): Promise<{ ok: boolean; message: string }> => {
+    try {
+      const dur = await getAudioDuration(file);
+      const key = getCanonicalAudioKey(item);
+      await saveAudioFile(key, file, file.name, file.type || 'audio/mpeg', dur);
+
+      const updates: Partial<MusicItem> = {
+        audioFileName: file.name,
+        audioMimeType: file.type || 'audio/mpeg',
+      };
+      if (dur > 0) {
+        updates.audioDuration = dur;
+        // For a single-segment view, durationSeconds is the segment length — only set it on whole items.
+        if (!item.isIndividualExcerpt) updates.durationSeconds = dur;
+      }
+      if (!item.audioStorageKey && !item.id.includes('__seg__')) updates.audioStorageKey = key;
+      await updateItem(item.id, updates);
+
+      resetPlayerIfSameAudio(item);
+      await refreshStoredAudioKeys();
+
+      const parentId = item.parentItemId || (item.id.includes('__seg__') ? item.id.split('__seg__')[0] : item.id);
+      const segs = items.find(i => i.id === parentId)?.segments || item.segments || [];
+      const outOfRange = dur > 0 ? segs.filter(sg => sg.endTime > dur + 0.5) : [];
+      if (outOfRange.length > 0) {
+        return {
+          ok: false,
+          message: `Audio attached (${formatAudioDuration(dur)}), but ${outOfRange.length} excerpt(s) end past the file's length — is this the same file?`,
+        };
+      }
+      return { ok: true, message: `Audio attached (${formatAudioDuration(dur)}). ${segs.length} excerpt(s) kept.` };
+    } catch (err: any) {
+      return { ok: false, message: `Could not save the audio file: ${err?.message || err}. Your browser storage may be full.` };
+    }
+  };
+
+  // Opens the shared hidden file picker to re-upload audio for the given excerpt.
+  const openReplaceAudioPicker = (item: MusicItem, e?: React.MouseEvent) => {
+    e?.stopPropagation();
+    pendingReplaceItemRef.current = item;
+    replaceAudioInputRef.current?.click();
+  };
+
+  const handleReplaceAudioInputChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    const target = pendingReplaceItemRef.current;
+    pendingReplaceItemRef.current = null;
+    if (!file || !target) return;
+    const result = await handleReplaceExcerptAudio(target, file);
+    alert(`${result.ok ? '✅' : '⚠️'} ${target.parentName || target.name}: ${result.message}`);
+  };
+
+  // --- Listen tracker: logs a listen once >50% of an excerpt (or its full card) has been played ---
+  const itemsRefForTracker = useRef<MusicItem[]>([]);
+  itemsRefForTracker.current = items;
+  const listenAccumRef = useRef<Record<string, number>>({});
+  const lastTrackedTimeRef = useRef<number | null>(null);
+
+  const trackListenTick = (audio: HTMLAudioElement) => {
+    const prev = lastTrackedTimeRef.current;
+    lastTrackedTimeRef.current = audio.currentTime;
+    const item = activeAudioItemRef.current;
+    if (!item || audio.paused || prev === null) return;
+    const delta = audio.currentTime - prev;
+    if (delta <= 0 || delta > 1.5) return; // ignore seeks / loop wrap-arounds
+
+    const docId = item.parentItemId || item.id.split('__seg__')[0];
+    const doc = itemsRefForTracker.current.find(i => i.id === docId) || item;
+    const segs = doc.segments || [];
+    const segId = activeSegmentIdRef.current;
+    const seg = segs.find(s => s.id === segId);
+    const fileLen = audio.duration || doc.audioDuration || doc.durationSeconds || 0;
+
+    const segLen = seg
+      ? seg.endTime - seg.startTime
+      : (doc.endTime !== undefined && doc.startTime !== undefined ? doc.endTime - doc.startTime : fileLen);
+    const cardLen = segs.length > 0
+      ? segs.reduce((sum, s) => sum + Math.max(0, s.endTime - s.startTime), 0)
+      : segLen;
+
+    const entries: ListenLogEntry[] = [];
+    const segKey = `${docId}::seg::${segId || ''}`;
+    const cardKey = `${docId}::card`;
+    listenAccumRef.current[segKey] = (listenAccumRef.current[segKey] || 0) + delta;
+    listenAccumRef.current[cardKey] = (listenAccumRef.current[cardKey] || 0) + delta;
+    const now = Date.now();
+    if (segLen > 0 && listenAccumRef.current[segKey] > segLen * 0.5) {
+      listenAccumRef.current[segKey] = 0;
+      entries.push({ at: now, scope: 'segment', ...(segId ? { segmentId: segId } : {}) });
+    }
+    if (cardLen > 0 && listenAccumRef.current[cardKey] > cardLen * 0.5) {
+      listenAccumRef.current[cardKey] = 0;
+      entries.push({ at: now, scope: 'card' });
+    }
+    if (entries.length > 0) {
+      const log = [...(doc.listenLog || []), ...entries].slice(-1000);
+      updateItem(docId, { listenLog: log });
+    }
+  };
+  const trackListenTickRef = useRef(trackListenTick);
+  trackListenTickRef.current = trackListenTick;
+
+  // Spacebar toggles play/pause while the player bar is visible
+  const togglePlayPauseRef = useRef<() => void>(() => {});
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.code !== 'Space' || e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
+      if (!activeAudioItemRef.current || activeTab !== 'excerpt') return;
+      const t = e.target as HTMLElement | null;
+      if (t) {
+        const tag = t.tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || tag === 'BUTTON' || tag === 'A' || t.isContentEditable) return;
+      }
+      e.preventDefault();
+      togglePlayPauseRef.current();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [activeTab]);
+
   const togglePlayPauseAudio = () => {
     if (!audioElementRef.current || !activeAudioItem) return;
     if (isPlayingAudio) {
@@ -1616,6 +1822,8 @@ export default function App() {
       audioElementRef.current.play().then(() => setIsPlayingAudio(true)).catch(console.error);
     }
   };
+
+  togglePlayPauseRef.current = togglePlayPauseAudio;
 
   const toggleLoopAudio = () => {
     const nextLoop = !isLoopingAudio;
@@ -4435,6 +4643,7 @@ export default function App() {
       if (i.type === 'artist' && i.name) set.add(i.name);
       if (i.parentName) set.add(i.parentName);
       if (i.linkedArtistName) set.add(i.linkedArtistName);
+      i.segments?.forEach(seg => { if (seg.artistName) set.add(seg.artistName); });
     });
     return Array.from(set).sort();
   }, [items]);
@@ -4461,8 +4670,12 @@ export default function App() {
         if (item.type !== 'excerpt') return [item];
         if (item.segments && item.segments.length > 0) {
           return item.segments.map((seg, idx) => {
-            const segDuration = Math.max(0, Math.round((seg.endTime - seg.startTime) * 10) / 10);
-            const { artist, track } = getExcerptArtistAndTrack(item);
+            const segDuration = Math.max(0, Math.round((seg.endTime - seg.startTime) * 1000) / 1000);
+            // An excerpt-specific artist overrides the card's linked artist
+            const segArtistOverrides: Partial<MusicItem> = seg.artistName?.trim()
+              ? { linkedArtistName: seg.artistName.trim(), linkedArtistId: seg.artistId }
+              : {};
+            const { artist, track } = getExcerptArtistAndTrack({ ...item, ...segArtistOverrides });
             const artistTrackLabel = track && artist && track !== artist ? `${artist} • ${track}` : (track || artist || item.parentName || '');
             const combinedTags = Array.from(new Set([...(seg.tags || []), ...(item.tags || [])]));
             return {
@@ -4470,7 +4683,8 @@ export default function App() {
               id: `${item.id}__seg__${seg.id}`,
               name: seg.name || `Excerpt ${idx + 1}`,
               parentName: item.name || artistTrackLabel,
-              subtitle: `${formatAudioDuration(seg.startTime)} - ${formatAudioDuration(seg.endTime)}${artistTrackLabel ? ` • ${artistTrackLabel}` : ''}`,
+              subtitle: `${formatPreciseTime(seg.startTime)} - ${formatPreciseTime(seg.endTime)}${artistTrackLabel ? ` • ${artistTrackLabel}` : ''}`,
+              ...segArtistOverrides,
               startTime: seg.startTime,
               endTime: seg.endTime,
               durationSeconds: segDuration,
@@ -4507,6 +4721,7 @@ export default function App() {
           (item.comments && item.comments.toLowerCase().includes(cleanSearch)) ||
           (!item.isIndividualExcerpt && item.segments && item.segments.some(seg => 
             (seg.name && seg.name.toLowerCase().includes(cleanSearch)) ||
+            (seg.artistName && seg.artistName.toLowerCase().includes(cleanSearch)) ||
             (seg.comments && seg.comments.toLowerCase().includes(cleanSearch)) ||
             (seg.tags && seg.tags.some(t => t.toLowerCase().includes(cleanSearch)))
           ));
@@ -4624,15 +4839,19 @@ export default function App() {
 
       const isFilteringActive = selectedTags.length > 0 || searchQuery.trim() !== '' || activeTab !== 'all' || filters.songRange !== 'all' || filters.lengthRange !== 'all' || filters.relevanceRange !== 'all' || filters.familiarityRange !== 'all' || filters.creator !== 'all';
 
-      const activeSortConfigs = isFilteringActive
-        ? [{ field: 'relevance', direction: 'desc' as const }, ...sortConfigs.filter(c => c.field !== 'relevance')]
+      // An explicit "Listens" sort takes priority; otherwise relevance-first would bury it on the Excerpts tab.
+      const activeSortConfigs = isFilteringActive && sortConfigs[0]?.field !== 'listens'
+        ?[{ field: 'relevance', direction: 'desc' as const }, ...sortConfigs.filter(c => c.field !== 'relevance')]
         : sortConfigs;
 
       for (const config of activeSortConfigs) {
         let valA: any = a[config.field as keyof MusicItem];
         let valB: any = b[config.field as keyof MusicItem];
 
-        if (config.field === 'lastFmPlaycount') {
+        if (config.field === 'listens') {
+          valA = getItemListenEntries(a).length;
+          valB = getItemListenEntries(b).length;
+        } else if (config.field === 'lastFmPlaycount') {
           valA = getItemScrobbleCount(a, filters.timeframe);
           valB = getItemScrobbleCount(b, filters.timeframe);
         } else if (config.field === 'relevance' && a.id in sortOverrides) {
@@ -4718,7 +4937,7 @@ export default function App() {
           return prev.filter(c => c.field !== field);
         }
       } else {
-        const defaultDesc = ['lastFmPlaycount', 'relevance', 'familiarity', 'songCount', 'createdAt', 'rating'].includes(field);
+        const defaultDesc = ['listens', 'lastFmPlaycount', 'relevance', 'familiarity', 'songCount', 'createdAt', 'rating'].includes(field);
         return [...prev, { field, direction: defaultDesc ? 'desc' : 'asc' }];
       }
     });
@@ -5207,21 +5426,29 @@ export default function App() {
                   <span>Sync Audio</span>
                 </button>
 
-                <Button
-                  onClick={() => handleOpenExcerptUpload()}
-                  className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold shadow-lg shadow-emerald-900/30 shrink-0"
-                  title="Upload an audio sample / excerpt file"
-                >
-                  <Volume2 className="h-4 w-4" />
-                  <span>Upload Excerpt</span>
-                </Button>
+                <div className="flex flex-col gap-2 shrink-0">
+                  <Button
+                    onClick={() => handleOpenExcerptUpload()}
+                    className="flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold shadow-lg shadow-emerald-900/30"
+                    title="Upload an audio sample / excerpt file"
+                  >
+                    <Volume2 className="h-4 w-4" />
+                    <span>Upload Excerpt</span>
+                  </Button>
+                  <Button onClick={() => setImportModalOpen(true)} className="flex items-center justify-center gap-2">
+                    <Plus className="h-5 w-5" />
+                    <span>Import Links</span>
+                  </Button>
+                </div>
               </>
             )}
 
-            <Button onClick={() => setImportModalOpen(true)} className="flex items-center gap-2 shrink-0">
-              <Plus className="h-5 w-5" />
-              <span>Import Links</span>
-            </Button>
+            {activeTab !== 'excerpt' && (
+              <Button onClick={() => setImportModalOpen(true)} className="flex items-center gap-2 shrink-0">
+                <Plus className="h-5 w-5" />
+                <span>Import Links</span>
+              </Button>
+            )}
           </div>
         </header>
 
@@ -5234,6 +5461,7 @@ export default function App() {
               {[
                 { label: 'Alphabetical', field: 'name' },
                 { label: 'Scrobbles', field: 'lastFmPlaycount' },
+                ...(activeTab === 'excerpt' ? [{ label: 'Listens', field: 'listens' }] : []),
                 { label: 'Relevance', field: 'relevance' },
                 { label: 'Familiarity', field: 'familiarity' },
                 { label: 'Length', field: 'durationSeconds' },
@@ -7028,6 +7256,21 @@ export default function App() {
                             >
                               <Repeat className={cn("h-3.5 w-3.5", isItemInLoopSequence(item) && "animate-spin-slow")} />
                             </button>
+                            <button
+                              type="button"
+                              onClick={(e) => openReplaceAudioPicker(item, e)}
+                              className={cn(
+                                "p-0.5 hover:scale-125 transition-all cursor-pointer flex items-center justify-center focus:outline-none",
+                                isExcerptAudioMissing(item)
+                                  ? "text-amber-400 animate-pulse"
+                                  : "text-white/60 hover:text-emerald-300"
+                              )}
+                              title={isExcerptAudioMissing(item)
+                                ? "Audio file missing on this device — click to re-upload the MP3 (excerpt timings are kept)"
+                                : "Replace / re-upload this excerpt's audio file (excerpt timings are kept)"}
+                            >
+                              <Upload className="h-3.5 w-3.5" />
+                            </button>
                           </>
                         )}
                         <button
@@ -7140,7 +7383,7 @@ export default function App() {
                           <div className="flex items-center gap-1.5 flex-wrap mb-2 py-0.5">
                             <div className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[10px] font-mono font-semibold bg-emerald-950/60 border border-emerald-500/40 text-emerald-300">
                               <Scissors className="h-2.5 w-2.5 text-emerald-400 shrink-0" />
-                              <span>{formatAudioDuration(item.startTime || 0)} - {formatAudioDuration(item.endTime || item.durationSeconds || 0)}</span>
+                              <span>{formatPreciseTime(item.startTime || 0)} - {formatPreciseTime(item.endTime || item.durationSeconds || 0)}</span>
                               {item.durationSeconds !== undefined && (
                                 <span className="text-[9px] text-emerald-400/80">({item.durationSeconds}s)</span>
                               )}
@@ -7169,7 +7412,7 @@ export default function App() {
                                       ? "bg-emerald-500 text-zinc-950 border-emerald-400 shadow-xs scale-105"
                                       : "bg-emerald-950/40 hover:bg-emerald-500/20 text-emerald-300 border-emerald-500/30"
                                   )}
-                                  title={`Play ${seg.name} (${formatAudioDuration(seg.startTime)} - ${formatAudioDuration(seg.endTime)})${seg.tags && seg.tags.length > 0 ? ` • Excerpt Tags: ${seg.tags.map(t => '#' + t).join(', ')}` : ''}`}
+                                  title={`Play ${seg.name}${seg.artistName ? ` — ${seg.artistName}` : ''} (${formatPreciseTime(seg.startTime)} - ${formatPreciseTime(seg.endTime)})${seg.tags && seg.tags.length > 0 ? ` • Excerpt Tags: ${seg.tags.map(t => '#' + t).join(', ')}` : ''}`}
                                 >
                                   <Scissors className="h-2.5 w-2.5 shrink-0 text-emerald-400" />
                                   <span className="truncate max-w-[100px]">{seg.name}</span>
@@ -7232,7 +7475,10 @@ export default function App() {
                       <div className="min-h-[26px] mb-2 flex items-center justify-between gap-1.5 flex-wrap">
                         <ItemClusterBadges item={item} activeClusters={activeClusters} viewMode="cards" onUpdateItem={updateItem} />
                         {item.type === 'excerpt' && (
-                          <ExcerptBpmKeyBadge item={item} onUpdateItem={updateItem} />
+                          <div className="flex items-center gap-1.5">
+                            <ListenCountBadge entries={getItemListenEntries(item)} />
+                            <ExcerptBpmKeyBadge item={item} onUpdateItem={updateItem} />
+                          </div>
                         )}
                       </div>
 
@@ -7466,6 +7712,21 @@ export default function App() {
                             >
                               <Repeat className={cn("h-3 w-3", isItemInLoopSequence(item) && "animate-spin-slow")} />
                             </button>
+                            <button
+                              type="button"
+                              onClick={(e) => openReplaceAudioPicker(item, e)}
+                              className={cn(
+                                "p-0.5 hover:scale-125 transition-all cursor-pointer flex items-center justify-center focus:outline-none",
+                                isExcerptAudioMissing(item)
+                                  ? "text-amber-400 animate-pulse"
+                                  : "text-white/60 hover:text-emerald-300"
+                              )}
+                              title={isExcerptAudioMissing(item)
+                                ? "Audio file missing on this device — click to re-upload the MP3 (excerpt timings are kept)"
+                                : "Replace / re-upload this excerpt's audio file (excerpt timings are kept)"}
+                            >
+                              <Upload className="h-3 w-3" />
+                            </button>
                           </>
                         )}
                         <button
@@ -7551,7 +7812,7 @@ export default function App() {
                           <div className="flex items-center gap-1 flex-wrap py-0.5">
                             <div className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-mono font-semibold bg-emerald-950/60 border border-emerald-500/40 text-emerald-300">
                               <Scissors className="h-2 w-2 text-emerald-400 shrink-0" />
-                              <span>{formatAudioDuration(item.startTime || 0)} - {formatAudioDuration(item.endTime || item.durationSeconds || 0)}</span>
+                              <span>{formatPreciseTime(item.startTime || 0)} - {formatPreciseTime(item.endTime || item.durationSeconds || 0)}</span>
                             </div>
                           </div>
                         ) : item.segments && item.segments.length > 0 ? (
@@ -7572,7 +7833,7 @@ export default function App() {
                                       ? "bg-emerald-500 text-zinc-950 border-emerald-400 shadow-xs scale-105"
                                       : "bg-emerald-950/40 hover:bg-emerald-500/20 text-emerald-300 border-emerald-500/30"
                                   )}
-                                  title={`Play ${seg.name} (${formatAudioDuration(seg.startTime)} - ${formatAudioDuration(seg.endTime)})${seg.tags && seg.tags.length > 0 ? ` • Excerpt Tags: ${seg.tags.map(t => '#' + t).join(', ')}` : ''}`}
+                                  title={`Play ${seg.name}${seg.artistName ? ` — ${seg.artistName}` : ''} (${formatPreciseTime(seg.startTime)} - ${formatPreciseTime(seg.endTime)})${seg.tags && seg.tags.length > 0 ? ` • Excerpt Tags: ${seg.tags.map(t => '#' + t).join(', ')}` : ''}`}
                                 >
                                   <Scissors className="h-2 w-2 shrink-0 text-emerald-400" />
                                   <span className="truncate max-w-[70px]">{seg.name}</span>
@@ -7592,7 +7853,10 @@ export default function App() {
                       <div className="flex items-center justify-between gap-1 flex-wrap">
                         <ItemClusterBadges item={item} activeClusters={activeClusters} viewMode="small-cards" onUpdateItem={updateItem} />
                         {item.type === 'excerpt' && (
-                          <ExcerptBpmKeyBadge item={item} onUpdateItem={updateItem} compact />
+                          <div className="flex items-center gap-1">
+                            <ListenCountBadge compact entries={getItemListenEntries(item)} />
+                            <ExcerptBpmKeyBadge item={item} onUpdateItem={updateItem} compact />
+                          </div>
                         )}
                       </div>
 
@@ -7875,7 +8139,10 @@ export default function App() {
 
                           {/* Excerpt BPM & Key Badge in List View */}
                           {item.type === 'excerpt' && (
-                            <ExcerptBpmKeyBadge item={item} onUpdateItem={updateItem} compact />
+                            <>
+                              <ListenCountBadge compact entries={getItemListenEntries(item)} />
+                              <ExcerptBpmKeyBadge item={item} onUpdateItem={updateItem} compact />
+                            </>
                           )}
                         </div>
 
@@ -7978,6 +8245,21 @@ export default function App() {
                             title={isItemInLoopSequence(item) ? "In loop queue (Click to remove)" : "Add excerpt to loop sequence"}
                           >
                             <Repeat className={cn("h-3.5 w-3.5", isItemInLoopSequence(item) && "animate-spin-slow")} />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={(e) => openReplaceAudioPicker(item, e)}
+                            className={cn(
+                              "p-1 hover:bg-brand-bg rounded-lg transition-all cursor-pointer",
+                              isExcerptAudioMissing(item)
+                                ? "text-amber-400 bg-amber-500/10 animate-pulse"
+                                : "text-brand-muted hover:text-emerald-400"
+                            )}
+                            title={isExcerptAudioMissing(item)
+                              ? "Audio file missing on this device — click to re-upload the MP3 (excerpt timings are kept)"
+                              : "Replace / re-upload this excerpt's audio file (excerpt timings are kept)"}
+                          >
+                            <Upload className="h-3.5 w-3.5" />
                           </button>
                         </>
                       )}
@@ -8471,6 +8753,8 @@ export default function App() {
         onDeleteItem={(itemToDelete) => promptDeleteSingleItem(itemToDelete)}
         onPlayAudio={(itemToPlay, shouldLoop, segmentId) => playAudioExcerpt(itemToPlay, shouldLoop, segmentId)}
         onSeekAudio={(time) => seekAudio(time)}
+        onReplaceAudio={handleReplaceExcerptAudio}
+        isAudioMissing={isExcerptAudioMissing}
         onAnalyze={(itemToAnalyze) => handleAnalyze(itemToAnalyze)}
         onEnrichItem={(itemToEnrich) => handleEnrichSingleItem(itemToEnrich)}
         onOpenExcerptUpload={(artistName, trackName, artistId, trackId) => handleOpenExcerptUpload(artistName, trackName, artistId, trackId)}
@@ -8829,6 +9113,7 @@ export default function App() {
         onSave={handleSaveExcerpt}
         availableArtists={items.filter(i => i.type === 'artist')}
         availableTracks={items.filter(i => i.type === 'track')}
+        knownArtistNames={existingArtistNames}
         presetArtistName={presetExcerptArtist}
         presetTrackName={presetExcerptTrack}
         clusters={activeClusters}
@@ -8837,13 +9122,23 @@ export default function App() {
       {/* Cross-Device Audio Sync & Backup Modal */}
       <AudioSyncModal
         isOpen={isAudioSyncModalOpen}
-        onClose={() => setIsAudioSyncModalOpen(false)}
+        onClose={() => { setIsAudioSyncModalOpen(false); refreshStoredAudioKeys(); }}
         items={items}
+      />
+
+      {/* Shared hidden picker for re-uploading an excerpt's audio file */}
+      <input
+        ref={replaceAudioInputRef}
+        type="file"
+        accept="audio/*,.mp3,.wav,.ogg,.m4a,.flac,.aac"
+        className="hidden"
+        onChange={handleReplaceAudioInputChange}
       />
 
       {/* Persistent Audio Player Bar (Plays in background & lockscreen) */}
       <AudioPlayerBar
         item={activeAudioItem}
+        listenLog={activeAudioItem ? items.find(i => i.id === (activeAudioItem.parentItemId || activeAudioItem.id.split('__seg__')[0]))?.listenLog : undefined}
         activeSegmentId={activeSegmentId}
         isPlaying={isPlayingAudio}
         isLooping={isLoopingAudio}
