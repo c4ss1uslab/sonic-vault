@@ -1445,3 +1445,90 @@ export async function enrichAlbumFromLastFm(
     return null;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Lightweight fetchers for the listening dashboard (no per-item enrichment).
+// ---------------------------------------------------------------------------
+
+export interface LastFmChartEntry {
+  name: string;
+  artist?: string;
+  playcount: number;
+  url: string;
+  imageUrl?: string;
+}
+
+export interface LastFmScrobble {
+  uts: number; // epoch seconds; 0 for now-playing
+  name: string;
+  artist: string;
+  album?: string;
+  url: string;
+  imageUrl?: string;
+  nowPlaying?: boolean;
+}
+
+async function lfmGet(params: Record<string, string | number>, apiKey: string): Promise<any> {
+  const key = apiKey.trim() || DEFAULT_FALLBACK_API_KEY;
+  const qs = new URLSearchParams({ ...Object.fromEntries(Object.entries(params).map(([k, v]) => [k, String(v)])), api_key: key, format: 'json' });
+  const res = await fetch(`${BASE_URL}?${qs.toString()}`);
+  const data = await res.json();
+  if (data.error) throw new Error(data.message || `Last.fm Error Code ${data.error}`);
+  return data;
+}
+
+const asList = (v: any): any[] => (Array.isArray(v) ? v : v ? [v] : []);
+
+export async function fetchLastFmChartLite(
+  username: string,
+  apiKey: string,
+  kind: 'artists' | 'tracks' | 'albums',
+  period: LastFmPeriod = '1month',
+  limit = 10
+): Promise<LastFmChartEntry[]> {
+  const method = `user.gettop${kind}`;
+  const data = await lfmGet({ method, user: username.trim(), period, limit }, apiKey);
+  const root = data[`top${kind}`] || {};
+  const raw = asList(root[kind.slice(0, -1)]);
+  return raw.map((r: any) => ({
+    name: r.name,
+    artist: r.artist ? (typeof r.artist === 'string' ? r.artist : r.artist.name || r.artist['#text']) : undefined,
+    playcount: parseInt(r.playcount || '0', 10),
+    url: r.url,
+    imageUrl: cleanImage(r.image),
+  }));
+}
+
+/**
+ * Scrobbles since `fromUts` (epoch seconds), newest first. Stops after `maxPages` pages of 200.
+ */
+export async function fetchLastFmScrobblesSince(
+  username: string,
+  apiKey: string,
+  fromUts: number,
+  maxPages = 5
+): Promise<{ scrobbles: LastFmScrobble[]; total: number; truncated: boolean }> {
+  const scrobbles: LastFmScrobble[] = [];
+  let total = 0;
+  let totalPages = 1;
+  for (let page = 1; page <= Math.min(maxPages, totalPages); page++) {
+    const data = await lfmGet({ method: 'user.getrecenttracks', user: username.trim(), from: fromUts, limit: 200, page }, apiKey);
+    const attr = data.recenttracks?.['@attr'] || {};
+    total = parseInt(attr.total || '0', 10);
+    totalPages = parseInt(attr.totalPages || '1', 10);
+    for (const t of asList(data.recenttracks?.track)) {
+      const nowPlaying = t['@attr']?.nowplaying === 'true';
+      if (nowPlaying && page > 1) continue;
+      scrobbles.push({
+        uts: nowPlaying ? 0 : parseInt(t.date?.uts || '0', 10),
+        name: t.name,
+        artist: typeof t.artist === 'string' ? t.artist : t.artist?.['#text'] || t.artist?.name || 'Unknown Artist',
+        album: typeof t.album === 'string' ? t.album : t.album?.['#text'] || undefined,
+        url: t.url,
+        imageUrl: cleanImage(t.image),
+        nowPlaying,
+      });
+    }
+  }
+  return { scrobbles, total, truncated: totalPages > maxPages };
+}

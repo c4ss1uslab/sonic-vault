@@ -18,7 +18,7 @@ import { onAuthStateChanged, signInWithPopup, signInWithRedirect, getRedirectRes
 import { auth, db, handleFirestoreError, OperationType, deepCleanForFirestore } from './lib/firebase';
 import { getDocFromServer, doc as firestoreDoc } from 'firebase/firestore';
 import { MusicItem, ItemType, TagCluster, LastFmSettings, AudioSegment, ListenLogEntry } from './types';
-import { AudioWaveform, Library, Plus, Search, Filter, LogOut, Music, User as UserIcon, Disc, ListMusic, Tag, Star, ChevronRight, ChevronLeft, ChevronDown, ChevronUp, PanelLeftClose, PanelLeftOpen, Menu, Share2, Download, Trash2, X, ExternalLink, Upload, FileSpreadsheet, CheckSquare, Square, Edit3, Image as ImageIcon, RefreshCw, Sparkles, Layers, HelpCircle, Minus, GripVertical, ArrowUp, ArrowDown, Move, LayoutGrid, Grid3x3, LayoutList, Globe, RotateCcw, FileText, Copy, Check, Radio, Palette, Clock, Volume2, VolumeX, Volume1, Play, Pause, Repeat, Repeat1, Headphones, Mic, MessageSquare, Paperclip, Link2, Unlink, Music2, Scissors, Pencil, FolderSync } from 'lucide-react';
+import { AudioWaveform, Library, Plus, Search, Filter, LogOut, Music, User as UserIcon, Disc, ListMusic, Tag, Star, ChevronRight, ChevronLeft, ChevronDown, ChevronUp, PanelLeftClose, PanelLeftOpen, Menu, Share2, Download, Trash2, X, ExternalLink, Upload, FileSpreadsheet, CheckSquare, Square, Edit3, Image as ImageIcon, RefreshCw, Sparkles, Layers, HelpCircle, Minus, GripVertical, ArrowUp, ArrowDown, Move, LayoutGrid, Grid3x3, LayoutList, Globe, RotateCcw, FileText, Copy, Check, Radio, Palette, Clock, Volume2, VolumeX, Volume1, Play, Pause, Repeat, Repeat1, Headphones, Mic, MessageSquare, Paperclip, Link2, Unlink, Music2, Scissors, Pencil, FolderSync, LayoutDashboard } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { cn } from './lib/utils';
 import { parseMusicLinks, parsePlaylistSpreadsheet, parseAlbumSpreadsheet, analyzeItem, AVAILABLE_MODELS, clusterTagsWithAI } from './lib/gemini';
@@ -28,6 +28,7 @@ import { ClusterColorModal, ClusterColorGrid } from './components/ClusterColorPi
 import { AudioPlayerBar } from './components/AudioPlayerBar';
 import { ListenCountBadge, getItemListenEntries } from './components/ListenCountBadge';
 import { ExcerptUploadModal } from './components/ExcerptUploadModal';
+import { ListeningDashboard } from './components/ListeningDashboard';
 import { AudioSyncModal } from './components/AudioSyncModal';
 import { getClusterColor, CLUSTER_COLOR_PALETTE } from './lib/clusterColors';
 import { enrichArtistFromLastFm, enrichTrackFromLastFm, enrichAlbumFromLastFm, fetchItemArtwork, fetchArtistPicture, fetchAlbumCover, fetchTrackCover, getTimeframeShortLabel, getTimeframeFullLabel } from './lib/lastfm';
@@ -848,7 +849,7 @@ export default function App() {
   const [isPublishingDemo, setIsPublishingDemo] = useState(false);
   const [showPublishDemoModal, setShowPublishDemoModal] = useState(false);
 
-  const [activeTab, setActiveTab] = useState<ItemType | 'all'>('all');
+  const [activeTab, setActiveTab] = useState<ItemType | 'all' | 'dashboard'>('all');
   const [searchInput, setSearchInput] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [visibleCount, setVisibleCount] = useState(50);
@@ -1604,6 +1605,9 @@ export default function App() {
         trackListenTickRef.current(audio);
         enforceSegmentBounds();
       };
+      // Any jump (user seek, segment switch, loop wrap) restarts the listen-time baseline
+      // instead of being counted or silently dropping the next real tick.
+      audio.onseeked = () => { lastTrackedTimeRef.current = audio.currentTime; };
 
       // timeupdate fires only ~4x/sec; poll every frame while playing so
       // millisecond-precise excerpt end points are respected.
@@ -1746,6 +1750,9 @@ export default function App() {
   itemsRefForTracker.current = items;
   const listenAccumRef = useRef<Record<string, number>>({});
   const lastTrackedTimeRef = useRef<number | null>(null);
+  // Latest log we wrote per doc: the snapshot echo can lag behind a second listen
+  // landing right after the first, which would otherwise overwrite it.
+  const pendingListenLogRef = useRef<Record<string, ListenLogEntry[]>>({});
 
   const trackListenTick = (audio: HTMLAudioElement) => {
     const prev = lastTrackedTimeRef.current;
@@ -1753,7 +1760,9 @@ export default function App() {
     const item = activeAudioItemRef.current;
     if (!item || audio.paused || prev === null) return;
     const delta = audio.currentTime - prev;
-    if (delta <= 0 || delta > 1.5) return; // ignore seeks / loop wrap-arounds
+    // Seeks and loop wrap-arounds reset the baseline via onseeking; this only guards
+    // against odd jumps. Background tabs throttle timeupdate, so allow a few seconds.
+    if (delta <= 0 || delta > 5 * Math.max(1, audio.playbackRate || 1)) return;
 
     const docId = item.parentItemId || item.id.split('__seg__')[0];
     const doc = itemsRefForTracker.current.find(i => i.id === docId) || item;
@@ -1784,12 +1793,31 @@ export default function App() {
       entries.push({ at: now, scope: 'card' });
     }
     if (entries.length > 0) {
-      const log = [...(doc.listenLog || []), ...entries].slice(-1000);
-      updateItem(docId, { listenLog: log });
+      const fromDoc = doc.listenLog || [];
+      const pending = pendingListenLogRef.current[docId];
+      const lastAt = (l: ListenLogEntry[]) => (l.length ? l[l.length - 1].at : 0);
+      const base = pending && lastAt(pending) > lastAt(fromDoc) ? pending : fromDoc;
+      const log = [...base, ...entries].slice(-1000);
+      pendingListenLogRef.current[docId] = log;
+      if (!isDemoMode) {
+        // Reflect the listen in the UI immediately, before the Firestore round trip.
+        setItems(prevItems => prevItems.map(i => (i.id === docId ? { ...i, listenLog: log } : i)));
+      }
+      Promise.resolve(updateItem(docId, { listenLog: log })).catch(err => {
+        console.warn('[listen tracker] Could not save listen — check that firestore.rules allows "listenLog".', err);
+      });
     }
   };
   const trackListenTickRef = useRef(trackListenTick);
   trackListenTickRef.current = trackListenTick;
+
+  // Stable callbacks for the dashboard (its memoized stats depend on them).
+  const playAudioExcerptRef = useRef(playAudioExcerpt);
+  playAudioExcerptRef.current = playAudioExcerpt;
+  const playExcerptFromDashboard = useCallback((item: MusicItem, segmentId?: string) => {
+    playAudioExcerptRef.current(item, undefined, segmentId, true);
+  }, []);
+  const openLastFmModal = useCallback(() => setIsLastFmModalOpen(true), []);
 
   // Spacebar toggles play/pause while the player bar is visible
   const togglePlayPauseRef = useRef<() => void>(() => {});
@@ -5096,6 +5124,7 @@ export default function App() {
             { id: 'playlist', label: 'Playlists', icon: ListMusic },
             { id: 'track', label: 'Tracks', icon: Music },
             { id: 'excerpt', label: 'Excerpts', icon: Volume2 },
+            { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
           ].map(tab => (
             <button
               key={tab.id}
@@ -5207,6 +5236,7 @@ export default function App() {
                   { id: 'playlist', label: 'Playlists', icon: ListMusic },
                   { id: 'track', label: 'Tracks', icon: Music },
                   { id: 'excerpt', label: 'Excerpts', icon: Volume2 },
+                  { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
                 ].map(tab => (
                   <button
                     key={tab.id}
@@ -5282,6 +5312,14 @@ export default function App() {
             <Menu className="h-5 w-5" />
           </button>
         </div>
+        {activeTab === 'dashboard' ? (
+          <ListeningDashboard
+            items={items}
+            lastFmSettings={lastFmSettings}
+            onConnectLastFm={openLastFmModal}
+            onPlayExcerpt={playExcerptFromDashboard}
+          />
+        ) : (<>
         <header className="flex flex-col md:flex-row md:items-center justify-between mb-8 gap-4">
           <div>
             <h2 className="text-3xl font-bold flex items-center flex-wrap gap-2.5">
@@ -8337,6 +8375,7 @@ export default function App() {
             <p className="text-brand-muted">Try adjusting your filters or import some links.</p>
           </div>
         )}
+        </>)}
       </main>
 
       {/* Mobile Bottom Nav */}
@@ -8348,6 +8387,7 @@ export default function App() {
           { id: 'playlist', icon: ListMusic },
           { id: 'track', icon: Music },
           { id: 'excerpt', icon: Volume2 },
+          { id: 'dashboard', icon: LayoutDashboard },
         ].map(tab => (
           <button
             key={tab.id}

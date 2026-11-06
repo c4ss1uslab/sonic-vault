@@ -76,6 +76,7 @@ service cloud.firestore {
              (!('linkedTrackId' in data) || data.linkedTrackId == null || (data.linkedTrackId is string && data.linkedTrackId.size() <= 128)) &&
              (!('linkedTrackName' in data) || data.linkedTrackName == null || (data.linkedTrackName is string && data.linkedTrackName.size() <= 500)) &&
              (!('isLooping' in data) || data.isLooping == null || (data.isLooping is bool)) &&
+             (!('listenLog' in data) || data.listenLog == null || (data.listenLog is list && data.listenLog.size() <= 1000)) &&
              (!('lastFmPlaycount' in data) || data.lastFmPlaycount == null || ((data.lastFmPlaycount is int || data.lastFmPlaycount is float) && data.lastFmPlaycount >= 0)) &&
              (!('lastFmPeriodPlaycount' in data) || data.lastFmPeriodPlaycount == null || ((data.lastFmPeriodPlaycount is int || data.lastFmPeriodPlaycount is float) && data.lastFmPeriodPlaycount >= 0)) &&
              (!('lastFmPeriod' in data) || data.lastFmPeriod == null || (data.lastFmPeriod is string && data.lastFmPeriod.size() <= 100)) &&
@@ -124,7 +125,7 @@ service cloud.firestore {
                         'segments', 'activeSegmentId', 'startTime', 'endTime',
                         'linkedArtistId', 'linkedArtistName', 'linkedTrackId', 'linkedTrackName', 'isLooping',
                         'releaseDate', 'artistUrl', 'lastFmPlaycount', 'lastFmPeriodPlaycount',
-                        'lastFmPeriod', 'lastFmUrl', 'lastFmListeners', 'lastFmEnrichedAt', 'updatedAt'
+                        'lastFmPeriod', 'lastFmUrl', 'lastFmListeners', 'lastFmEnrichedAt', 'listenLog', 'updatedAt'
                       ]);
 
       allow delete: if isSignedIn() && resource.data.userId == request.auth.uid;
