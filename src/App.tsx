@@ -5343,7 +5343,7 @@ export default function App() {
                 : 'Curation & Metadata Control'}
             </p>
           </div>
-          <div className="flex items-center gap-3 flex-wrap sm:flex-nowrap">
+          <div className="flex items-center gap-2 flex-wrap xl:flex-nowrap">
             {/* Visualization Mode Switcher Icons */}
             <div className="flex items-center bg-brand-card/90 border border-brand-border p-1 rounded-xl gap-1 shadow-sm">
               <button
@@ -5416,65 +5416,67 @@ export default function App() {
 
             {activeTab === 'excerpt' && (
               <>
-                {/* Continuous Multi-Excerpt Loop Sequence Button */}
-                {(() => {
-                  const selectedExcerpts = filteredItems.filter(i => (i.type === 'excerpt' || i.isIndividualExcerpt) && selectedIds.includes(i.id));
-                  const allExcerpts = filteredItems.filter(i => i.type === 'excerpt' || i.isIndividualExcerpt);
-                  const isMultiLooping = isLoopPlaylistActive && loopPlaylist.length > 1;
+                {/* Continuous Multi-Excerpt Loop Sequence & Sync Audio Stacked */}
+                <div className="flex flex-col gap-1.5 shrink-0">
+                  {(() => {
+                    const selectedExcerpts = filteredItems.filter(i => (i.type === 'excerpt' || i.isIndividualExcerpt) && selectedIds.includes(i.id));
+                    const allExcerpts = filteredItems.filter(i => i.type === 'excerpt' || i.isIndividualExcerpt);
+                    const isMultiLooping = isLoopPlaylistActive && loopPlaylist.length > 1;
 
-                  return (
-                    <button
-                      type="button"
-                      onClick={() => handleStartLoopingSelected()}
-                      className={cn(
-                        "px-3 py-2 rounded-xl border text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer shadow-sm active:scale-95 shrink-0",
-                        isMultiLooping
-                          ? "bg-emerald-500 text-zinc-950 border-emerald-400 font-extrabold shadow-emerald-500/20"
-                          : selectedExcerpts.length > 0
-                          ? "bg-emerald-500 hover:bg-emerald-400 text-zinc-950 border-emerald-400 font-extrabold shadow-emerald-500/20 animate-pulse"
-                          : "bg-brand-card hover:bg-brand-border/60 border-brand-border text-emerald-400 hover:text-emerald-300"
-                      )}
-                      title={
-                        selectedExcerpts.length > 0
-                          ? `Loop ${selectedExcerpts.length} selected excerpts continually in sequence`
-                          : isMultiLooping
-                          ? `Currently looping ${loopPlaylist.length} excerpts continually (Click to restart sequence)`
-                          : `Loop all ${allExcerpts.length} excerpts continually in sequence`
-                      }
-                    >
-                      <Repeat className={cn("h-4 w-4 shrink-0", isMultiLooping && "animate-spin-slow")} />
-                      <span>
-                        {selectedExcerpts.length > 0
-                          ? `Loop Selected (${selectedExcerpts.length})`
-                          : isMultiLooping
-                          ? `Looping (${loopPlaylist.length})`
-                          : `Loop All (${allExcerpts.length})`}
-                      </span>
-                    </button>
-                  );
-                })()}
+                    return (
+                      <button
+                        type="button"
+                        onClick={() => handleStartLoopingSelected()}
+                        className={cn(
+                          "px-2.5 py-1.5 rounded-lg border text-[11px] font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer shadow-sm active:scale-95 whitespace-nowrap",
+                          isMultiLooping
+                            ? "bg-emerald-500 text-zinc-950 border-emerald-400 font-extrabold shadow-emerald-500/20"
+                            : selectedExcerpts.length > 0
+                            ? "bg-emerald-500 hover:bg-emerald-400 text-zinc-950 border-emerald-400 font-extrabold shadow-emerald-500/20 animate-pulse"
+                            : "bg-brand-card hover:bg-brand-border/60 border-brand-border text-emerald-400 hover:text-emerald-300"
+                        )}
+                        title={
+                          selectedExcerpts.length > 0
+                            ? `Loop ${selectedExcerpts.length} selected excerpts continually in sequence`
+                            : isMultiLooping
+                            ? `Currently looping ${loopPlaylist.length} excerpts continually (Click to restart sequence)`
+                            : `Loop all ${allExcerpts.length} excerpts continually in sequence`
+                        }
+                      >
+                        <Repeat className={cn("h-3.5 w-3.5 shrink-0", isMultiLooping && "animate-spin-slow")} />
+                        <span>
+                          {selectedExcerpts.length > 0
+                            ? `Loop Selected (${selectedExcerpts.length})`
+                            : isMultiLooping
+                            ? `Looping (${loopPlaylist.length})`
+                            : `Loop All (${allExcerpts.length})`}
+                        </span>
+                      </button>
+                    );
+                  })()}
 
-                <button
-                  type="button"
-                  onClick={() => setIsAudioSyncModalOpen(true)}
-                  className="px-3 py-2 rounded-xl bg-brand-card hover:bg-brand-border/60 border border-brand-border text-brand-text font-bold text-xs flex items-center gap-1.5 transition-all cursor-pointer shadow-sm active:scale-95 shrink-0 text-emerald-400 hover:text-emerald-300"
-                  title="Cross-device audio sync & backup between desktop and mobile"
-                >
-                  <FolderSync className="h-4 w-4 shrink-0 text-emerald-400" />
-                  <span>Sync Audio</span>
-                </button>
+                  <button
+                    type="button"
+                    onClick={() => setIsAudioSyncModalOpen(true)}
+                    className="px-2.5 py-1.5 rounded-lg bg-brand-card hover:bg-brand-border/60 border border-brand-border text-brand-text font-bold text-[11px] flex items-center justify-center gap-1.5 transition-all cursor-pointer shadow-sm active:scale-95 whitespace-nowrap text-emerald-400 hover:text-emerald-300"
+                    title="Cross-device audio sync & backup between desktop and mobile"
+                  >
+                    <FolderSync className="h-3.5 w-3.5 shrink-0 text-emerald-400" />
+                    <span>Sync Audio</span>
+                  </button>
+                </div>
 
-                <div className="flex flex-col gap-2 shrink-0">
+                <div className="flex flex-col gap-1.5 shrink-0">
                   <Button
                     onClick={() => handleOpenExcerptUpload()}
-                    className="flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold shadow-lg shadow-emerald-900/30"
+                    className="px-2.5 py-1.5 text-xs flex items-center justify-center gap-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold shadow-lg shadow-emerald-900/30 whitespace-nowrap"
                     title="Upload an audio sample / excerpt file"
                   >
-                    <Volume2 className="h-4 w-4" />
+                    <Volume2 className="h-3.5 w-3.5 shrink-0" />
                     <span>Upload Excerpt</span>
                   </Button>
-                  <Button onClick={() => setImportModalOpen(true)} className="flex items-center justify-center gap-2">
-                    <Plus className="h-5 w-5" />
+                  <Button onClick={() => setImportModalOpen(true)} className="px-2.5 py-1.5 text-xs flex items-center justify-center gap-1.5 whitespace-nowrap">
+                    <Plus className="h-3.5 w-3.5 shrink-0" />
                     <span>Import Links</span>
                   </Button>
                 </div>
